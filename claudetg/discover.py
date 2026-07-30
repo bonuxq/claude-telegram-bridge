@@ -8,6 +8,7 @@ root is read from a transcript instead of decoded from the name.
 import os
 
 from . import config as cfgmod
+from .i18n import t
 
 CLAUDE_HOME = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 
@@ -49,7 +50,7 @@ def list_projects(home=CLAUDE_HOME, cfg=None):
             "root": root.replace("\\", "/"),
             "key": key,
             "name": (meta or {}).get("name") or os.path.basename(
-                str(root).rstrip("\\/")) or "проект",
+                str(root).rstrip("\\/")) or t("project.fallback"),
             "enabled": meta is not None,
             "last_active": mtime,
             "exists": os.path.isdir(root),

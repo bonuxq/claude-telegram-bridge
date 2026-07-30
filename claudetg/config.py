@@ -12,6 +12,9 @@ STATE_PATH = os.path.join(ROOT, "state.json")
 DEFAULTS = {
     "bot_token": "",
     "chat_id": None,
+    # UI language for Telegram messages and the widget: "en", "ru", "uk",
+    # "ko", "zh", "vi", "el", "pt", "es". None = auto-detect from the OS.
+    "language": None,
     "host": "127.0.0.1",
     "port": 8787,
     # Must stay below the hook `timeout` in settings.json, so the hook returns

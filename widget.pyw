@@ -26,7 +26,8 @@ from tkinter import font as tkfont
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
-from claudetg import usage  # noqa: E402  (needs ROOT on the path)
+from claudetg import i18n, usage  # noqa: E402  (needs ROOT on the path)
+from claudetg.i18n import t  # noqa: E402
 
 CONFIG = os.path.join(ROOT, "config.json")
 POS_FILE = os.path.join(ROOT, "widget.json")
@@ -50,14 +51,14 @@ ACCENT = "#3987e5"         # meter fill while usage is comfortable
 SEG_COLORS = {"standard": "#86b6ef",   # light blue (sequential ramp, step 250)
               "fable": "#d95926"}      # orange (categorical slot 2, dark step)
 
-AT_PC = {"dot": GOOD, "button": "Я за ПК", "label": "за ПК — только журнал"}
-AWAY = {"dot": WARNING, "button": "Не за ПК", "label": "управление в Telegram"}
-DEAD = {"dot": CRITICAL, "button": "Мост offline",
-        "label": "демон не отвечает — кликни, подниму"}
+# Themes hold i18n keys: the language is only known once config.json is read.
+AT_PC = {"dot": GOOD, "button": "widget.atpc", "label": "widget.atpc.hint"}
+AWAY = {"dot": WARNING, "button": "widget.away", "label": "widget.away.hint"}
+DEAD = {"dot": CRITICAL, "button": "widget.dead", "label": "widget.dead.hint"}
 
 BAR_H = 8                  # meter thickness; r = h/2 gives the 4px rounded end
-NO_DATA_TIP = "нет данных от статус-строки — перезапусти окно VSCode"
-NO_FABLE_TIP = "нет данных по Fable-лимитам — возможно, статус-строка их не присылает"
+NO_DATA_TIP = "widget.no_data"
+NO_FABLE_TIP = "widget.no_fable"
 ICON_PATH = os.path.join(ROOT, "widget.ico")
 
 
@@ -429,6 +430,7 @@ class PopupMenu:
 class Widget:
     def __init__(self):
         cfg = load_cfg()
+        i18n.set_language(cfg.get("language"))
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 8787)
         self.base = f"http://{host}:{port}"
@@ -486,7 +488,8 @@ class Widget:
         self.toggle.bind("<Leave>", lambda e: self.set_hover(False))
         self.toggle.bind("<Configure>", lambda e: self.paint_toggle())
 
-        self.toggle_tip = Tooltip(self.toggle, lambda: self.theme["label"], small)
+        self.lang_var = tk.StringVar(value=cfg.get("language") or "auto")
+        self.toggle_tip = Tooltip(self.toggle, lambda: t(self.theme["label"]), small)
 
         tk.Frame(self.root, height=1, bg=HAIRLINE).pack(fill="x", padx=10,
                                                         pady=(7, 0))
@@ -496,10 +499,11 @@ class Widget:
         self.last_usage = None
         limits_bar = tk.Frame(self.root, bg=SURFACE)
         limits_bar.pack(fill="x", padx=14, pady=(6, 0))
-        tk.Label(limits_bar, text="Лимиты", font=small, bg=SURFACE, fg=MUTED,
-                 anchor="w").pack(side="left")
+        tk.Label(limits_bar, text=t("widget.limits"), font=small, bg=SURFACE,
+                 fg=MUTED, anchor="w").pack(side="left")
         self.seg = {}
-        for view, caption in (("fable", "Fable"), ("standard", "Стандарт")):
+        for view, caption in (("fable", "Fable"),
+                              ("standard", t("widget.pool.standard"))):
             lab = tk.Label(limits_bar, text=caption, font=small, bg=SURFACE,
                            fg=MUTED, cursor="hand2", padx=5)
             lab.pack(side="right")
@@ -514,8 +518,9 @@ class Widget:
         meters.pack(fill="x", padx=14, pady=(5, 5))
         meters.columnconfigure(1, weight=1)
         self.meters = {}
-        for row, (key, label) in enumerate((("five_hour", "Сессия"),
-                                            ("seven_day", "Неделя"))):
+        for row, (key, label) in enumerate(
+                (("five_hour", t("widget.meter.five_hour")),
+                 ("seven_day", t("widget.meter.seven_day")))):
             tk.Label(meters, text=label, font=small, bg=SURFACE, fg=SECONDARY,
                      anchor="w", width=8).grid(row=row * 2, column=0, sticky="w",
                                                pady=2)
@@ -531,7 +536,7 @@ class Widget:
                        padx=(2, 0), pady=(0, 2))
             reset.grid_remove()     # appears only when there is data to show
             self.meters[key] = {"bar": bar, "pct": pct, "reset": reset}
-            self.tips[key] = NO_DATA_TIP
+            self.tips[key] = t(NO_DATA_TIP)
             Tooltip(bar, lambda k=key: self.tips[k], small)
 
         tk.Frame(self.root, height=1, bg=HAIRLINE).pack(fill="x", padx=10)
@@ -565,19 +570,44 @@ class Widget:
         alpha = [("radio", f"{100 - int(opacity * 100)}%", self.alpha_var,
                   opacity, self.set_alpha)
                  for opacity in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5)]
-        auto = [("radio", label, self.auto_var, seconds, self.save_pos)
-                for seconds, label in ((0, "Выкл"), (60, "1 мин"), (120, "2 мин"),
-                                       (300, "5 мин"), (600, "10 мин"),
-                                       (900, "15 мин"))]
+        auto = [("radio", t("menu.off"), self.auto_var, 0, self.save_pos)]
+        auto += [("radio", t("menu.min", n=seconds // 60), self.auto_var,
+                  seconds, self.save_pos)
+                 for seconds in (60, 120, 300, 600, 900)]
+        langs = [("radio", t("menu.lang.auto"), self.lang_var, "auto",
+                  lambda: self.set_lang("auto"))]
+        langs += [("radio", i18n.NATIVE[code], self.lang_var, code,
+                   lambda code=code: self.set_lang(code))
+                  for code in i18n.LANGUAGES]
         return [
-            ("cmd", "Проекты…", self.open_projects),
-            ("cmd", "Функции…", self.open_settings),
-            ("sub", "Прозрачность", alpha),
-            ("sub", "Авто «не за ПК»", auto),
+            ("cmd", t("menu.projects"), self.open_projects),
+            ("cmd", t("menu.settings"), self.open_settings),
+            ("sub", t("menu.alpha"), alpha),
+            ("sub", t("menu.autoaway"), auto),
+            ("sub", t("menu.language"), langs),
             ("sep",),
-            ("cmd", "Скрыть в трей", self.root.withdraw),
-            ("cmd", "Закрыть виджет", self.close),
+            ("cmd", t("menu.tray"), self.root.withdraw),
+            ("cmd", t("menu.close"), self.close),
         ]
+
+    def set_lang(self, code):
+        """Persist via the daemon (it owns config.json), then restart the
+        widget: every caption is drawn once, a restart is the honest redraw."""
+        lang = code if code in i18n.LANGUAGES else None
+        if self.request("/settings", {"settings": {"language": lang}}) is None:
+            try:        # daemon down: write the config directly
+                with open(CONFIG, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg["language"] = lang
+                tmp = CONFIG + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, CONFIG)
+            except (OSError, ValueError):
+                pass
+        subprocess.Popen([sys.executable, os.path.join(ROOT, "widget.pyw")],
+                         cwd=ROOT)
+        self.close()
 
     def open_menu(self, event=None):
         if event is not None:
@@ -630,7 +660,7 @@ class Widget:
         c.create_oval(w - 2 * r, 0, w, h, fill=fill, outline="")
         c.create_rectangle(r, 0, w - r, h, fill=fill, outline="")
         c.create_oval(14, 11, 22, 19, fill=self.theme["dot"], outline="")
-        c.create_text(32, 15, text=self.theme["button"], font=self.bold,
+        c.create_text(32, 15, text=t(self.theme["button"]), font=self.bold,
                       fill=PRIMARY, anchor="w")
 
     # -- borderless window plumbing --------------------------------------
@@ -800,11 +830,10 @@ class Widget:
     def open_projects(self):
         snapshot = self.request("/projects")
         if snapshot is None:
-            return self.paint(DEAD, "демон не отвечает — список недоступен")
+            return self.paint(DEAD, t("widget.dead.projects"))
         projects = snapshot.get("projects") or []
-        win = self.make_card("Проекты")
-        tk.Label(win, text="Отмеченные проекты получают свой топик в Telegram · "
-                           "изменения применяются сразу",
+        win = self.make_card(t("card.projects"))
+        tk.Label(win, text=t("card.projects.hint"),
                  font=self.small, bg=SURFACE, fg=MUTED, anchor="w", padx=14,
                  wraplength=400, justify="left").pack(fill="x", pady=(0, 6))
 
@@ -826,7 +855,8 @@ class Widget:
             self.push("/projects", {"keys": [k for k, v in chosen.items() if v]})
 
         for project in projects:
-            name = project["name"] + ("" if project["exists"] else "  (нет на диске)")
+            name = project["name"] + ("" if project["exists"]
+                                      else f"  {t('projects.missing')}")
             self.check_row(holder, name, project["enabled"],
                            lambda on, k=project["key"]: flip(k, on),
                            dim=not project["exists"]).pack(fill="x", pady=1)
@@ -836,10 +866,10 @@ class Widget:
     def open_settings(self):
         snapshot = self.request("/settings")
         if snapshot is None:
-            return self.paint(DEAD, "демон не отвечает — настройки недоступны")
+            return self.paint(DEAD, t("widget.dead.settings"))
         toggles = snapshot.get("settings") or []
-        win = self.make_card("Функции")
-        tk.Label(win, text="Изменения применяются сразу, без перезапуска",
+        win = self.make_card(t("card.settings"))
+        tk.Label(win, text=t("card.settings.hint"),
                  font=self.small, bg=SURFACE, fg=MUTED, anchor="w",
                  padx=14).pack(fill="x", pady=(0, 6))
         for toggle in toggles:
@@ -855,7 +885,7 @@ class Widget:
     def apply(self, snapshot):
         if snapshot is None:
             self.alive = False
-            self.paint(DEAD, "правый клик — меню и закрытие")
+            self.paint(DEAD, t("widget.dead.info"))
             return
         self.alive = True
         away = bool(snapshot.get("away"))
@@ -866,14 +896,14 @@ class Widget:
         waiting = snapshot.get("waiting") or []
         queued = snapshot.get("queued") or 0
 
-        names = ", ".join(sessions) if sessions else "нет"
-        info = [f"Сессии: {names}"]
+        names = ", ".join(sessions) if sessions else t("status.none")
+        info = [t("widget.sessions", names=names)]
         if waiting:
-            kinds = {"ask": "опросник", "stop": "жду задачу"}
-            info.append("Ждёт ответа: " + ", ".join(
-                kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting))
+            kinds = {"ask": t("widget.kind.ask"), "stop": t("widget.kind.stop")}
+            info.append(t("widget.waiting", kinds=", ".join(
+                kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting)))
         if queued:
-            info.append(f"В очереди задач: {queued}")
+            info.append(t("widget.queued", n=queued))
         # One line on the card; the full picture lives in the hover tip,
         # which skips the "Сессии:" prefix — it is plainly the session list.
         line = " · ".join(info)
@@ -933,7 +963,8 @@ class Widget:
             if used is None:
                 widgets["pct"].configure(text="—")
                 widgets["reset"].grid_remove()
-                self.tips[key] = NO_FABLE_TIP if fable_view and limits else NO_DATA_TIP
+                self.tips[key] = t(NO_FABLE_TIP if fable_view and limits
+                                   else NO_DATA_TIP)
                 self.draw_meter(widgets["bar"], None)
                 continue
             moment = usage.when(window.get("resets_at"))

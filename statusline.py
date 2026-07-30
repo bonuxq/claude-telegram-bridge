@@ -15,8 +15,21 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+from claudetg import i18n  # noqa: E402
+from claudetg.i18n import t  # noqa: E402
+
 CACHE = os.path.join(ROOT, "usage.json")
 RAW_SAMPLE = os.path.join(ROOT, "usage_sample.json")
+CONFIG = os.path.join(ROOT, "config.json")
+
+
+def _config_language():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return json.load(f).get("language")
+    except (OSError, ValueError):
+        return None
 
 
 def read_payload():
@@ -67,7 +80,8 @@ def line(payload):
         parts.append(os.path.basename(str(directory).rstrip("\\/")))
 
     limits = payload.get("rate_limits") or {}
-    for label, window in (("5ч", "five_hour"), ("нед", "seven_day")):
+    for window in ("five_hour", "seven_day"):
+        label = t("statusline." + window)
         data = limits.get(window) or {}
         used = data.get("used_percentage")
         if used is None:
@@ -81,6 +95,7 @@ def line(payload):
 
 
 def main():
+    i18n.set_language(_config_language())
     payload = read_payload()
     cache(payload)
     sys.stdout.buffer.write(line(payload).encode("utf-8"))

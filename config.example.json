@@ -3,6 +3,7 @@
 
   "bot_token": "СЮДА_ТОКЕН_ОТ_BOTFATHER",
   "chat_id": null,
+  "language": null,
 
   "host": "127.0.0.1",
   "port": 8787,

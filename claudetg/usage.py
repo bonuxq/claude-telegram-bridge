@@ -4,10 +4,12 @@ import json
 import os
 import time
 
+from .i18n import t
+
 CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "usage.json")
 
-WINDOWS = (("five_hour", "5-часовое окно"), ("seven_day", "Недельное"))
+WINDOWS = ("five_hour", "seven_day")
 
 
 def load(path=CACHE, max_age=None):
@@ -36,31 +38,33 @@ def when(epoch):
     remaining = epoch - time.time()
     stamp = time.localtime(epoch)
     same_day = time.strftime("%Y%m%d", stamp) == time.strftime("%Y%m%d")
-    at = time.strftime("в %H:%M" if same_day else "%d.%m в %H:%M", stamp)
+    clock = time.strftime("%H:%M", stamp)
+    at = (t("usage.at_time", time=clock) if same_day
+          else t("usage.at_date", date=time.strftime("%d.%m", stamp), time=clock))
     if remaining <= 0:
-        return f"обнуление {at}"
-    # Round, don't floor: flooring turns 59 seconds left into "через 0м".
+        return t("usage.reset", at=at)
+    # Round, don't floor: flooring turns 59 seconds left into "in 0m".
     hours, minutes = divmod(int(round(remaining / 60)), 60)
-    if hours >= 48:     # the weekly window: "93ч" reads worse than days
+    if hours >= 48:     # the weekly window: "93h" reads worse than days
         days, hours = divmod(hours, 24)
-        left = f"{days}д {hours}ч"
+        left = t("usage.left.dh", d=days, h=hours)
     elif hours:
-        left = f"{hours}ч {minutes:02d}м"
+        left = t("usage.left.hm", h=hours, m=f"{minutes:02d}")
     else:
-        left = f"{minutes}м"
-    return f"обнуление {at} (через {left})"
+        left = t("usage.left.m", m=minutes)
+    return t("usage.reset_in", at=at, left=left)
 
 
 def report(data):
     """Markdown block; empty string when there is nothing worth sending."""
     limits = (data or {}).get("rate_limits") or {}
     lines = []
-    for key, label in WINDOWS:
+    for key in WINDOWS:
         window = limits.get(key) or {}
         used = window.get("used_percentage")
         if used is None:
             continue
-        lines.append(f"`{bar(used)}` **{used:.0f}%** — {label}")
+        lines.append(f"`{bar(used)}` **{used:.0f}%** — {t('usage.window.' + key)}")
         moment = when(window.get("resets_at"))
         if moment:
             lines.append(f"   {moment}")

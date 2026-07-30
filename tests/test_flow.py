@@ -11,7 +11,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claudetg import config as cfgmod  # noqa: E402
 from claudetg import daemon as daemon_module  # noqa: E402
 from claudetg.daemon import Daemon  # noqa: E402
-from claudetg import render  # noqa: E402
+from claudetg import i18n, render  # noqa: E402
+
+# The assertions below are written against the Russian bundle; pin it so the
+# suite does not depend on the OS language of whoever runs it.
+i18n.set_language("ru")
 
 # Keep test noise out of the production log, or a real diagnosis later will
 # stumble over lines written by a test run.

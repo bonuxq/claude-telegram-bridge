@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 
+from .i18n import t
+
 SUMMARY_URL = "https://status.claude.com/api/v2/summary.json"
 
 INDICATOR_ICON = {"none": "🟢", "minor": "🟡", "major": "🟠", "critical": "🔴"}
@@ -78,8 +80,9 @@ def diff(old, new):
         before = old.get("components", {}).get(name)
         if before is not None and before != status:
             icon = COMPONENT_ICON.get(status, "⚪")
-            messages.append(f"{icon} **{name}** — {_ru(status)} "
-                            f"*(было: {_ru(before)})*")
+            messages.append(t("component.change", icon=icon, name=name,
+                              state=state_name(status),
+                              before=state_name(before)))
 
     old_incidents = old.get("incidents", {})
     for iid, data in new.get("incidents", {}).items():
@@ -87,7 +90,8 @@ def diff(old, new):
         if previous and previous.get("status") == data.get("status"):
             continue
         icon = IMPACT_ICON.get(data.get("impact"), "⚪")
-        head = "новый инцидент" if not previous else f"обновление: {data.get('status')}"
+        head = (t("incident.new") if not previous
+                else t("incident.update", status=data.get("status")))
         lines = [f"{icon} **{data.get('name')}** — {head}"]
         if data.get("update"):
             lines.append(data["update"][:1200])
@@ -97,22 +101,19 @@ def diff(old, new):
 
     for iid, data in old_incidents.items():
         if iid not in new.get("incidents", {}):
-            messages.append(f"✅ **{data.get('name')}** — инцидент закрыт")
+            messages.append(t("incident.closed", name=data.get("name")))
 
     return messages
 
 
-_RU = {
-    "operational": "работает",
-    "degraded_performance": "деградация",
-    "partial_outage": "частичный сбой",
-    "major_outage": "крупный сбой",
-    "under_maintenance": "обслуживание",
-}
+_STATES = ("operational", "degraded_performance", "partial_outage",
+           "major_outage", "under_maintenance")
 
 
-def _ru(status):
-    return _RU.get(status, status or "?")
+def state_name(status):
+    if status in _STATES:
+        return t("state." + status)
+    return status or "?"
 
 
 class Monitor:

@@ -15,7 +15,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
-from . import discover, render, status, transcript, usage
+from . import discover, i18n, render, status, transcript, usage
+from .i18n import t
 from .tgapi import Bot, TelegramError
 
 LOG_LOCK = threading.Lock()
@@ -296,8 +297,8 @@ class Daemon:
                                     now - started))
         for key, name, elapsed in stalled:
             self.send(key, name or "?",
-                      f"🐌 <b>{html.escape(name or '?')}</b> · ход идёт уже "
-                      f"{render.duration(elapsed)} без завершения", silent=False)
+                      t("stall", name=html.escape(name or "?"),
+                        duration=render.duration(elapsed)), silent=False)
 
     def digest_forever(self, hour):
         while True:
@@ -323,8 +324,9 @@ class Daemon:
             stats = dict(self.state.get("stats", {}).get(day) or {})
         if not stats:
             return
-        lines = [f"**Сводка за {day}**", ""]
-        rows = [("Проект", "Ходов", "Ошибок", "Время")]
+        lines = [f"**{t('digest.title', day=day)}**", ""]
+        rows = [(t("digest.project"), t("digest.turns"),
+                 t("digest.errors"), t("digest.time"))]
         for key, entry in sorted(stats.items()):
             meta = self.cfg["projects"].get(key) or {}
             rows.append((meta.get("name") or os.path.basename(key.rstrip("/")),
@@ -335,7 +337,7 @@ class Daemon:
                  for row in rows]
         table.insert(1, " ".join("-" * w for w in widths))
         lines.append("```\n" + "\n".join(table) + "\n```")
-        self.send(self.STATUS_KEY, "Статус Claude",
+        self.send(self.STATUS_KEY, t("topic.status"),
                   render.render("\n".join(lines)), silent=True)
 
     def git_summary(self, cwd):
@@ -355,12 +357,12 @@ class Daemon:
         changes = [l for l in (porcelain.stdout or "").splitlines() if l.strip()]
         head = (branch.stdout or "").strip() or "?"
         if not changes:
-            return f"ветка <code>{html.escape(head)}</code> · всё закоммичено"
+            return t("git.clean", branch=html.escape(head))
         shown = "\n".join(changes[:15])
-        more = f"\n… ещё {len(changes) - 15}" if len(changes) > 15 else ""
-        return (f"ветка <code>{html.escape(head)}</code> · "
-                f"незакоммичено файлов: {len(changes)}\n"
-                f"<pre>{html.escape(shown)}{html.escape(more)}</pre>")
+        more = ("\n" + t("git.more", count=len(changes) - 15)
+                if len(changes) > 15 else "")
+        return (t("git.dirty", branch=html.escape(head), count=len(changes)) +
+                f"\n<pre>{html.escape(shown)}{html.escape(more)}</pre>")
 
     # -- usage / rate limits --------------------------------------------
 
@@ -379,8 +381,8 @@ class Daemon:
         body = usage.report(data)
         if not body:
             return
-        self.send(self.USAGE_KEY, "Лимиты Claude",
-                  render.render(body, header="📊 <b>Лимиты</b>"), silent=True)
+        self.send(self.USAGE_KEY, t("topic.usage"),
+                  render.render(body, header=t("usage.header")), silent=True)
 
     # -- status page ----------------------------------------------------
 
@@ -400,8 +402,8 @@ class Daemon:
 
     def announce_status(self, message):
         # Outages are the one thing worth a notification even at the PC.
-        self.send(self.STATUS_KEY, "Статус Claude",
-                  render.render(message, header="📡 <b>status.claude.com</b>"),
+        self.send(self.STATUS_KEY, t("topic.status"),
+                  render.render(message, header=t("statuspage.header")),
                   silent=False)
 
     # -- hook events ----------------------------------------------------
@@ -440,7 +442,7 @@ class Daemon:
             return key, cached
 
         root = cfgmod.project_root_from_transcript(transcript) or cwd
-        name = os.path.basename(str(root).rstrip("\\/")) or "проект"
+        name = os.path.basename(str(root).rstrip("\\/")) or t("project.fallback")
         with self.lock:
             self.state["auto_names"][key] = name
         self.persist()
@@ -489,9 +491,9 @@ class Daemon:
             }
         self.track_transcript(sid, data.get("transcript_path"))
         if self.should_log("session"):
-            mode = "не за ПК" if self.away else "за ПК"
+            mode = t("mode.away") if self.away else t("mode.atpc")
             self.send(key, name,
-                      f"🟢 <b>{html.escape(name)}</b> · сессия открыта · режим: {mode}",
+                      t("session.opened", name=html.escape(name), mode=mode),
                       silent=True)
         return self.drain_queue(key)
 
@@ -500,7 +502,7 @@ class Daemon:
             self.sessions.pop(data.get("session_id"), None)
             self.state.get("todo_msgs", {}).pop(data.get("session_id"), None)
         if self.should_log("session"):
-            note = f"⚪ <b>{html.escape(name)}</b> · сессия закрыта"
+            note = t("session.closed", name=html.escape(name))
             if self.cfg.get("git_summary", True):
                 summary = self.git_summary(data.get("cwd"))
                 if summary:
@@ -524,8 +526,8 @@ class Daemon:
         """The turn died on an API error — usually an outage or a rate limit."""
         self.clear_turn(data.get("session_id"))
         self.bump_stat(key, "failures")
-        detail = _describe_failure(data) or "ход прерван ошибкой API"
-        head = render.header("🛑", f"{name} · сбой API")
+        detail = _describe_failure(data) or t("fail.api.text")
+        head = render.header("🛑", t("fail.api.head", name=name))
         self.send(key, name, render.render(f"```\n{detail[:1500]}\n```", header=head),
                   silent=False)
         return {}
@@ -547,8 +549,8 @@ class Daemon:
         return {}
 
     def render_todos(self, todos, name):
-        done = sum(1 for t in todos if t.get("status") == "completed")
-        lines = [f"📋 <b>{html.escape(name)}</b> · {done}/{len(todos)}"]
+        done = sum(1 for item in todos if item.get("status") == "completed")
+        lines = [t("todo.head", name=html.escape(name), done=done, total=len(todos))]
         for todo in todos:
             status = todo.get("status", "pending")
             label = html.escape(todo.get("content", ""))
@@ -588,7 +590,7 @@ class Daemon:
         if not self.should_log("failure"):
             return {}
         tool = data.get("tool_name", "?")
-        head = render.header("❌", f"{name} · {tool}")
+        head = render.header("❌", t("fail.tool.head", name=name, tool=tool))
         body = []
         what = _describe_tool(data.get("tool_input") or {})
         if what:
@@ -597,7 +599,7 @@ class Daemon:
         if detail:
             body.append(f"```\n{detail[:1500]}\n```")
         if not body:
-            body.append("*инструмент упал без подробностей*")
+            body.append(t("fail.tool.empty"))
         self.send(key, name, render.render("\n\n".join(body), header=head))
         return {}
 
@@ -634,7 +636,8 @@ class Daemon:
             self.send(key, name, self.closing(text, render.header("✅", name, seconds),
                                               streamed))
             self.report_usage()
-            self.send(key, name, f"▶️ Из очереди: {html.escape(queued[0][:300])}", silent=True)
+            self.send(key, name, t("queue.next", task=html.escape(queued[0][:300])),
+                      silent=True)
             return {"decision": "block", "reason": _join_tasks(queued)}
 
         head = render.header("✅", name, seconds)
@@ -646,11 +649,11 @@ class Daemon:
 
         waiter = Waiter("stop", sid, key)
         markup = {"inline_keyboard": [[
-            {"text": "▶️ Продолжай", "callback_data": f"go:{waiter.id}"},
-            {"text": "⏹ Достаточно", "callback_data": f"end:{waiter.id}"},
+            {"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
+            {"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"},
         ]]}
         msgs = self.closing(text, head, streamed)
-        msgs[-1] += "\n\n<i>Жду задачу — ответь сообщением в этот топик.</i>"
+        msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
         ids = self.send(key, name, msgs, markup=markup)
         self.report_usage()
         self.register(waiter, key, ids)
@@ -658,12 +661,10 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result:
-            self.send(key, name, "⏳ Ответа не было — сессия встала. "
-                                 "Напиши сюда позже, задачу подхвачу.", silent=True)
+            self.send(key, name, t("stop.timeout"), silent=True)
             return {}
         if result.get("released"):
-            self.send(key, name, "🖥 Ты за ПК — управление вернулось в VSCode.",
-                      silent=True)
+            self.send(key, name, t("stop.released"), silent=True)
             return {}
         if result.get("action") == "end":
             return {}
@@ -701,8 +702,7 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result or result.get("released"):
-            self.send(key, name, "⏳ Опросник без ответа — "
-                                 "вопрос вернётся к тебе в VSCode.", silent=True)
+            self.send(key, name, t("ask.timeout"), silent=True)
             return {}
         return {
             "hookSpecificOutput": {
@@ -715,7 +715,7 @@ class Daemon:
     def render_question(self, q, qi, total, name):
         # Built as markdown, not HTML: render() escapes its input, so any tags
         # written here would reach Telegram as visible text.
-        head = render.header("❓", f"{name} · вопрос {qi + 1}/{total}")
+        head = render.header("❓", t("ask.head", name=name, index=qi + 1, total=total))
         body = [f"**{q.get('question', '')}**"]
         for oi, opt in enumerate(q.get("options", [])):
             line = f"{oi + 1}. **{opt.get('label', '')}**"
@@ -724,8 +724,8 @@ class Daemon:
                 line += f"\n   {description}"
             body.append(line)
         if q.get("multiSelect"):
-            body.append("*Можно выбрать несколько, затем «Готово».*")
-        body.append("*Или ответь текстом реплаем на это сообщение.*")
+            body.append(t("ask.multi"))
+        body.append(t("ask.reply"))
         return render.render("\n\n".join(body), header=head)
 
     def question_markup(self, wid, qi, q):
@@ -734,7 +734,7 @@ class Daemon:
                   "callback_data": f"{'m' if multi else 'a'}:{wid}:{qi}:{oi}"}]
                 for oi, opt in enumerate(q.get("options", []))]
         if multi:
-            rows.append([{"text": "✅ Готово", "callback_data": f"d:{wid}:{qi}"}])
+            rows.append([{"text": t("btn.done"), "callback_data": f"d:{wid}:{qi}"}])
         return {"inline_keyboard": rows}
 
     # -- waiter bookkeeping ---------------------------------------------
@@ -765,8 +765,7 @@ class Daemon:
             return {}
         return {"hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": "Задачи, поставленные через Telegram, пока сессия "
-                                 "не слушала:\n" + _join_tasks(items)}}
+            "additionalContext": t("queue.context") + "\n" + _join_tasks(items)}}
 
     # -- telegram polling ------------------------------------------------
 
@@ -822,7 +821,7 @@ class Daemon:
             waiter = self.waiters.get(wid) if wid else None
         if waiter and waiter.kind == "stop":
             waiter.resolve({"action": "continue", "text": text})
-            self.ack(message, "принято, продолжаю")
+            self.ack(message, t("ack.continue"))
             return
         if waiter and waiter.kind == "ask":
             self.answer_by_text(waiter, text, message)
@@ -833,7 +832,7 @@ class Daemon:
         with self.lock:
             self.queue.setdefault(key, []).append(text)
         self.persist()
-        self.ack(message, "сессия сейчас не слушает — задача в очереди")
+        self.ack(message, t("ack.queued"))
 
     def answer_by_text(self, waiter, text, message):
         """Free-text reply to a question message answers that question."""
@@ -844,7 +843,7 @@ class Daemon:
             qi = min(waiter.message_ids.index(replied), len(questions) - 1)
         waiter.payload["answers"][questions[qi]["question"]] = text
         self.maybe_finish_ask(waiter)
-        self.ack(message, "ответ принят")
+        self.ack(message, t("ack.answer"))
 
     def maybe_finish_ask(self, waiter):
         answers = waiter.payload["answers"]
@@ -856,25 +855,25 @@ class Daemon:
         parts = data.split(":")
         if parts[0] == "mode":
             self.toggle_away()
-            self.bot.answer_callback(cq["id"], "режим переключён")
+            self.bot.answer_callback(cq["id"], t("cb.mode"))
             return
         if parts[0] == "p":
             if parts[1] == "none":
-                return self.bot.answer_callback(cq["id"], "пусто")
+                return self.bot.answer_callback(cq["id"], t("cb.empty"))
             return self.toggle_project(int(parts[1]), cq)
         waiter = self.waiters.get(parts[1] if len(parts) > 1 else "")
         if not waiter:
-            self.bot.answer_callback(cq["id"], "запрос уже неактуален")
+            self.bot.answer_callback(cq["id"], t("cb.stale"))
             return
         if parts[0] == "go":
             waiter.resolve({"action": "continue",
-                            "text": "Продолжай работу по текущему плану."})
+                            "text": t("task.default")})
         elif parts[0] == "end":
             waiter.resolve({"action": "end"})
         elif parts[0] in ("a", "m", "d"):
             self.on_answer_callback(parts, waiter, cq)
             return
-        self.bot.answer_callback(cq["id"], "принято")
+        self.bot.answer_callback(cq["id"], t("cb.accepted"))
 
     def on_answer_callback(self, parts, waiter, cq):
         kind, _, qi, *rest = parts
@@ -884,16 +883,16 @@ class Daemon:
         label = question["question"]
         if kind == "a":
             answers[label] = question["options"][int(rest[0])]["label"]
-            self.bot.answer_callback(cq["id"], "выбрано")
+            self.bot.answer_callback(cq["id"], t("cb.chosen"))
         elif kind == "m":
             chosen = answers.setdefault(label, [])
             option = question["options"][int(rest[0])]["label"]
             chosen.remove(option) if option in chosen else chosen.append(option)
-            self.bot.answer_callback(cq["id"], ", ".join(chosen) or "снято")
-            return  # multi-select stays open until "Готово"
+            self.bot.answer_callback(cq["id"], ", ".join(chosen) or t("cb.cleared"))
+            return  # multi-select stays open until "Done"
         elif kind == "d":
             answers.setdefault(label, [])
-            self.bot.answer_callback(cq["id"], "готово")
+            self.bot.answer_callback(cq["id"], t("cb.done"))
         self.maybe_finish_ask(waiter)
 
     # -- commands --------------------------------------------------------
@@ -903,8 +902,7 @@ class Daemon:
         if cmd == "/register":
             self.cfg["chat_id"] = chat_id
             cfgmod.save(self.cfg)
-            self.bot.send_message(chat_id, "✅ Группа привязана. Топики создам сам.",
-                                  thread_id=thread)
+            self.bot.send_message(chat_id, t("register.ok"), thread_id=thread)
             self.refresh_status()
             return
         if self.cfg["chat_id"] and chat_id != self.cfg["chat_id"]:
@@ -917,7 +915,7 @@ class Daemon:
             self.show_projects(chat_id, thread)
         elif cmd == "/release":
             freed = self.release_all()
-            self.bot.send_message(chat_id, f"освобождено ожиданий: {freed}",
+            self.bot.send_message(chat_id, t("released.count", count=freed),
                                   thread_id=thread)
         elif cmd == "/claude_status":
             threading.Thread(target=self.report_status_now,
@@ -925,7 +923,8 @@ class Daemon:
         elif cmd == "/queue":
             with self.lock:
                 total = {k: len(v) for k, v in self.queue.items() if v}
-            self.bot.send_message(chat_id, f"Очередь: {total or 'пусто'}", thread_id=thread)
+            self.bot.send_message(chat_id, t("queue.show", items=total or t("queue.empty")),
+                                  thread_id=thread)
 
     def show_projects(self, chat_id, thread, message_id=None):
         """Picker: one tappable row per known project, ✅ = bridged."""
@@ -935,13 +934,12 @@ class Daemon:
         rows = []
         for index, project in enumerate(catalogue):
             mark = "✅" if project["enabled"] else "▫️"
-            missing = "" if project["exists"] else " (нет на диске)"
+            missing = "" if project["exists"] else f" {t('projects.missing')}"
             rows.append([{"text": f"{mark} {project['name']}{missing}"[:60],
                           "callback_data": f"p:{index}"}])
-        markup = {"inline_keyboard": rows or [[{"text": "проектов не найдено",
+        markup = {"inline_keyboard": rows or [[{"text": t("projects.none"),
                                                 "callback_data": "p:none"}]]}
-        text = ("<b>Проекты</b>\nНажми, чтобы подключить или отключить топик.\n"
-                "<i>Подключённые отмечены ✅</i>")
+        text = t("projects.text")
         try:
             if message_id:
                 self.bot.edit_message(chat_id, message_id, text, markup=markup)
@@ -955,13 +953,13 @@ class Daemon:
         with self.lock:
             picker = list(self.state.get("picker") or [])
         if index >= len(picker):
-            return self.bot.answer_callback(cq["id"], "список устарел, вызови /projects")
+            return self.bot.answer_callback(cq["id"], t("projects.stale"))
         key = picker[index]
         current = {cfgmod.normalize(k) for k in (self.cfg.get("projects") or {})}
         current.symmetric_difference_update({cfgmod.normalize(key)})
         self.select_projects(current)
         message = cq.get("message") or {}
-        self.bot.answer_callback(cq["id"], "готово")
+        self.bot.answer_callback(cq["id"], t("cb.done"))
         self.show_projects(message.get("chat", {}).get("id"),
                            message.get("message_thread_id"),
                            message.get("message_id"))
@@ -971,14 +969,14 @@ class Daemon:
         try:
             snap = status.snapshot(status.fetch())
         except Exception as e:
-            self.bot.send_message(chat_id, f"не смог получить статус: {e}",
+            self.bot.send_message(chat_id, t("statuspage.error", error=e),
                                   thread_id=thread)
             return
         icon = status.INDICATOR_ICON.get(snap["indicator"], "⚪")
         lines = [f"{icon} <b>{html.escape(snap['description'] or '?')}</b>"]
         for comp, state in snap["components"].items():
             lines.append(f"{status.COMPONENT_ICON.get(state, '⚪')} "
-                         f"{html.escape(comp)} — {status._ru(state)}")
+                         f"{html.escape(comp)} — {status.state_name(state)}")
         if snap["incidents"]:
             lines.append("")
             for data in snap["incidents"].values():
@@ -990,28 +988,29 @@ class Daemon:
         with self.lock:
             live = [s.get("name", "?") for s in self.sessions.values() if s.get("alive")]
             pending = len(self.waiters)
-        mode = "🔕 не за ПК (управление активно)" if self.away else "💤 за ПК (только журнал)"
-        return (f"{mode}\nЖивых сессий: {', '.join(live) or 'нет'}\n"
-                f"Ждут ответа: {pending}")
+        mode = t("mode.status.away") if self.away else t("mode.status.atpc")
+        return (f"{mode}\n"
+                f"{t('status.sessions', names=', '.join(live) or t('status.none'))}\n"
+                f"{t('status.waiting', count=pending)}")
 
     # -- settings exposed to the widget ----------------------------------
 
     TOGGLES = [
-        ("live_messages", "Живой поток текста"),
-        ("report_tool_failures", "Сообщать о падениях инструментов"),
-        ("usage_report.enabled", "Остаток лимитов после хода"),
-        ("status_monitor.enabled", "Монитор status.claude.com"),
-        ("watchdog.enabled", "Сторож зависшего хода"),
-        ("daily_digest.enabled", "Сводка за день"),
-        ("git_summary", "Git-сводка при закрытии сессии"),
-        ("log_when_present.stop", "За ПК: итог хода"),
-        ("log_when_present.todo", "За ПК: список todo"),
-        ("log_when_present.session", "За ПК: открытие и закрытие сессий"),
-        ("log_when_present.live", "За ПК: живой поток текста"),
-        ("log_when_present.usage", "За ПК: остаток лимитов"),
-        ("log_when_present.notification", "За ПК: уведомления Claude"),
-        ("auto_discover", "Подхватывать любой новый проект"),
-        ("debug_hooks", "Журнал хуков (диагностика)"),
+        "live_messages",
+        "report_tool_failures",
+        "usage_report.enabled",
+        "status_monitor.enabled",
+        "watchdog.enabled",
+        "daily_digest.enabled",
+        "git_summary",
+        "log_when_present.stop",
+        "log_when_present.todo",
+        "log_when_present.session",
+        "log_when_present.live",
+        "log_when_present.usage",
+        "log_when_present.notification",
+        "auto_discover",
+        "debug_hooks",
     ]
 
     def get_setting(self, path):
@@ -1037,13 +1036,19 @@ class Daemon:
             self.cfg[head] = bool(enabled)
 
     def settings_snapshot(self):
-        return [{"path": path, "label": label, "enabled": self.get_setting(path)}
-                for path, label in self.TOGGLES]
+        return [{"path": path, "label": t("toggle." + path),
+                 "enabled": self.get_setting(path)}
+                for path in self.TOGGLES]
 
     def apply_settings(self, patch):
         with self.lock:
             for path, enabled in (patch or {}).items():
-                if any(path == p for p, _ in self.TOGGLES):
+                if path == "language":
+                    # Not a toggle: a language code, or None for auto-detect.
+                    lang = enabled if enabled in i18n.LANGUAGES else None
+                    self.cfg["language"] = lang
+                    i18n.set_language(lang)
+                elif path in self.TOGGLES:
                     self.set_setting(path, enabled)
         cfgmod.save(self.cfg)
         log("settings updated:", ", ".join(f"{k}={v}" for k, v in (patch or {}).items()))
@@ -1064,14 +1069,15 @@ class Daemon:
         return self.project_catalogue()
 
     SERVICE_TOPICS = (
-        ("__status__", "Статус Claude"),
-        ("__usage__", "Лимиты Claude"),
+        ("__status__", "topic.status"),
+        ("__usage__", "topic.usage"),
     )
 
     def ensure_service_topics(self):
         """Create the service topics up front instead of on first use, so the
         group is readable before anything happens to report."""
-        for key, title in self.SERVICE_TOPICS:
+        for key, title_key in self.SERVICE_TOPICS:
+            title = t(title_key)
             with self.lock:
                 existing = self.state["topics"].get(key)
             if existing:
@@ -1116,7 +1122,7 @@ class Daemon:
 
     def refresh_status(self):
         markup = {"inline_keyboard": [[{
-            "text": "💤 Я за ПК" if self.away else "🔕 Я не за ПК",
+            "text": t("pin.here") if self.away else t("pin.away"),
             "callback_data": "mode",
         }]]}
         text = self.status_text()
@@ -1188,12 +1194,11 @@ def _join_tasks(items):
 
 
 def _format_answers(answers):
-    lines = ["Пользователь ответил на опросник через Telegram:"]
+    lines = [t("answered.header")]
     for question, value in answers.items():
         picked = ", ".join(value) if isinstance(value, list) else value
-        lines.append(f"- {question} -> {picked or '(ничего не выбрано)'}")
-    lines.append("Продолжай работу с учётом этого выбора; "
-                 "повторно задавать эти вопросы не нужно.")
+        lines.append(f"- {question} -> {picked or t('answered.none')}")
+    lines.append(t("answered.footer"))
     return "\n".join(lines)
 
 
@@ -1255,14 +1260,15 @@ class SingleInstanceServer(ThreadingHTTPServer):
 
 def main():
     cfg = cfgmod.load()
+    i18n.set_language(cfg.get("language"))
     if not cfg["bot_token"]:
-        raise SystemExit("config.json: bot_token не задан")
+        raise SystemExit(t("err.notoken"))
 
     try:
         server = SingleInstanceServer((cfg["host"], cfg["port"]), Handler)
     except OSError:
         raise SystemExit(
-            f"порт {cfg['port']} занят — демон уже запущен, второй не нужен")
+            t("err.port", port=cfg["port"]))
 
     daemon = Daemon(cfg)
     Handler.daemon_ref = daemon

@@ -28,6 +28,11 @@ library only.
   and auto-away on keyboard idle.
 - **Watchdog, daily digest, git summaries, status.claude.com monitor** — all
   optional, all toggleable from the widget.
+- **9 languages** — English, Українська, Русский, 한국어, 中文, Tiếng Việt,
+  Ελληνικά, Português, Español. Auto-detected from the OS; switchable from
+  the widget menu (Language) or `"language"` in `config.json`. Translations
+  are plain `lang/messages_*.properties` files — adding a language is one
+  file, no code.
 
 ## How it works
 

@@ -8,6 +8,8 @@ converted to HTML instead.
 import html
 import re
 
+from .i18n import t
+
 LIMIT = 3900  # Telegram hard limit is 4096; leave room for headers/footers.
 
 _FENCE = re.compile(r"^[ \t]*```([\w+-]*)[ \t]*$", re.M)
@@ -223,7 +225,7 @@ def render(text, header=None, limit=LIMIT):
     if buf:
         messages.append(buf)
     if not messages:
-        messages = ["<i>(пустой ответ)</i>"]
+        messages = [f"<i>{t('render.empty')}</i>"]
 
     if header:
         head = header if len(messages) == 1 else f"{header} · 1/{len(messages)}"
@@ -236,10 +238,10 @@ def render(text, header=None, limit=LIMIT):
 def duration(seconds):
     seconds = int(seconds)
     if seconds < 60:
-        return f"{seconds}с"
+        return t("dur.s", n=seconds)
     if seconds < 3600:
-        return f"{seconds // 60}м {seconds % 60:02d}с"
-    return f"{seconds // 3600}ч {(seconds % 3600) // 60:02d}м"
+        return t("dur.ms", m=seconds // 60, s=f"{seconds % 60:02d}")
+    return t("dur.hm", h=seconds // 3600, m=f"{(seconds % 3600) // 60:02d}")
 
 
 def header(status, project, seconds=None):
