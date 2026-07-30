@@ -1,0 +1,31 @@
+{
+  "_комментарий": "Скопируй в config.json и вставь токен от @BotFather. chat_id подставится сам после команды /register в группе.",
+
+  "bot_token": "СЮДА_ТОКЕН_ОТ_BOTFATHER",
+  "chat_id": null,
+
+  "host": "127.0.0.1",
+  "port": 8787,
+  "autostart": true,
+
+  "wait_seconds": 3300,
+  "hook_timeout_seconds": 3600,
+
+  "projects": {},
+  "auto_discover": false,
+  "exclude_paths": [],
+
+  "away_default": false,
+  "live_messages": true,
+  "log_when_present": ["stop", "todo", "session"],
+  "report_tool_failures": false,
+  "git_summary": true,
+
+  "usage_report": { "enabled": true, "max_age_seconds": 3600 },
+  "status_monitor": { "enabled": true, "interval_seconds": 300, "components": [] },
+  "watchdog": { "enabled": true, "minutes": 20 },
+  "daily_digest": { "enabled": true, "hour": 21 },
+
+  "spawn": { "enabled": false, "permission_mode": "default" },
+  "debug_hooks": false
+}
