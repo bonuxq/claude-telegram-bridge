@@ -14,5 +14,9 @@ tests/test-daemon.log
 __pycache__/
 *.pyc
 
+# IDE
+.idea/
+.vscode/
+
 # Editor backups
 *.backup-*
