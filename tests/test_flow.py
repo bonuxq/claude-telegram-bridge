@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claudetg import config as cfgmod  # noqa: E402
 from claudetg import daemon as daemon_module  # noqa: E402
 from claudetg.daemon import Daemon  # noqa: E402
-from claudetg import i18n, render  # noqa: E402
+from claudetg import i18n, render, usage  # noqa: E402
 
 # The assertions below are written against the Russian bundle; pin it so the
 # suite does not depend on the OS language of whoever runs it.
@@ -21,6 +21,15 @@ i18n.set_language("ru")
 # stumble over lines written by a test run.
 daemon_module.LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                       "test-daemon.log")
+
+# Redirect BOTH files the daemon writes, not just the state. /register,
+# /projects and the settings endpoint all end in cfgmod.save(), which writes
+# cfgmod.PATH — pointed at the real config.json this suite would overwrite the
+# live bot token and the project list with its own fixtures.
+cfgmod.PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "test-config.json")
+cfgmod.STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "test-state.json")
 
 # A fake path on purpose: the tests never touch it on disk, and hard-coding a
 # real home directory would tie the suite to one machine.
@@ -66,7 +75,8 @@ def make_daemon(tmp_state, away):
                 # lying around on disk.
                 "usage_report": {"enabled": False},
                 "projects": {cfgmod.normalize(PROJECT): {"name": "TGbotClaude"}}})
-    cfgmod.STATE_PATH = tmp_state
+    cfgmod.STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     tmp_state)
     d = Daemon.__new__(Daemon)
     d.cfg = cfg
     d.bot = FakeBot()
@@ -74,6 +84,7 @@ def make_daemon(tmp_state, away):
     d.lock = threading.RLock()
     d.tail_lock = threading.Lock()
     d.sessions, d.waiters, d.by_topic, d.queue = {}, {}, {}, {}
+    d.spawning = set()
     d.persist = lambda: None
     return d
 
@@ -880,6 +891,367 @@ def test_session_start_drains_queue():
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "задача из телеги" in ctx, out
     print("PASS SessionStart hands over the queue")
+
+
+def test_register_cannot_be_stolen():
+    """A bot's username is public; /register from a stranger's chat must not
+    redirect everything this bridge reports."""
+    d = make_daemon("s.json", away=False)
+    d.cfg["chat_id"] = -100
+    d.on_command("/register", 777, None, {"chat": {"id": 777}})
+    assert d.cfg["chat_id"] == -100, "an outsider rebound the bridge"
+    assert d.bot.sent == [], "must not even confirm the bot exists"
+    print("PASS /register cannot be hijacked from another chat")
+
+
+def test_register_binds_an_unbound_bridge():
+    d = make_daemon("s.json", away=False)
+    d.cfg["chat_id"] = None
+    d.refresh_status = lambda: None
+    d.ensure_service_topics = lambda: None
+    d.on_command("/register", 555, None, {"chat": {"id": 555}})
+    assert d.cfg["chat_id"] == 555, d.cfg["chat_id"]
+    print("PASS /register binds a bridge that has no group yet")
+
+
+def test_unregister_forgets_the_topics():
+    """Topic ids belong to the group that owned them; carrying them into the
+    next group would post into whatever thread happens to share the number."""
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.state["status_message_id"] = 7
+    d.on_command("/unregister", -100, None, {"chat": {"id": -100}})
+    assert d.cfg["chat_id"] is None, d.cfg["chat_id"]
+    assert d.state["topics"] == {}, d.state["topics"]
+    assert d.state["status_message_id"] is None
+    print("PASS /unregister releases the group and its topic ids")
+
+
+def test_spawn_is_off_by_default():
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    calls = []
+    d.run_spawn = lambda *a: calls.append(a)
+    d.deliver_text("собери релиз", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert calls == [], "spawn must never run without being switched on"
+    assert d.queue[key] == ["собери релиз"], d.queue
+    print("PASS a task is queued, not spawned, while spawn is off")
+
+
+def test_spawn_runs_when_no_session_is_listening():
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": True, "permission_mode": "acceptEdits",
+                      "command": "claude-stub", "timeout_seconds": 60}
+    started = []
+    d.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+    d.run_spawn = lambda k, command, cwd, task: started.append((command, cwd, task))
+    d.deliver_text("собери релиз", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert wait_for(lambda: started), "no agent was started"
+    command, cwd, task = started[0]
+    assert command[:3] == ["claude-stub", "-p", "собери релиз"], command
+    assert "--permission-mode" in command and "acceptEdits" in command, command
+    assert cwd == "C:/Work/BridgeProject", cwd
+    assert key not in d.queue, "a spawned task must not also sit in the queue"
+    print("PASS a task with no session starts a headless agent")
+
+
+def test_spawn_stands_aside_for_a_live_session():
+    """A live session gets the task through its own Stop hook — starting a
+    second agent in the same tree would have two of them editing at once."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": True, "command": "claude-stub"}
+    d.sessions["s1"] = {"project": key, "name": "TGbotClaude", "alive": True}
+    started = []
+    d.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+    d.run_spawn = lambda *a: started.append(a)
+    d.deliver_text("собери релиз", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert started == [], "spawned an agent next to a live session"
+    assert d.queue[key] == ["собери релиз"], d.queue
+    print("PASS a live session keeps the task instead of spawning")
+
+
+def test_spawn_refuses_a_project_without_a_directory():
+    """Auto-discovered projects are keyed by their transcript folder, which is
+    not a tree anything can be built in."""
+    d = make_daemon("s.json", away=True)
+    key = "c:/users/me/.claude/projects/d--work-thing"
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": True, "command": "claude-stub"}
+    started = []
+    d.run_spawn = lambda *a: started.append(a)
+    d.deliver_text("собери релиз", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert started == [], "spawned into a directory that is not the project"
+    assert d.queue[key] == ["собери релиз"], d.queue
+    print("PASS an auto-discovered project is queued, never spawned")
+
+
+def test_spawn_runs_one_agent_per_project():
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": True, "command": "claude-stub"}
+    d.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+    started = []
+    d.run_spawn = lambda *a: started.append(a)     # never clears `spawning`
+    message = {"chat": {"id": -100}, "message_thread_id": TOPIC}
+    d.deliver_text("первая", TOPIC, message)
+    d.deliver_text("вторая", TOPIC, message)
+    assert wait_for(lambda: started), "no agent was started"
+    assert len(started) == 1, started
+    assert d.queue[key] == ["вторая"], d.queue
+    print("PASS the second task waits in the queue, not in a second agent")
+
+
+def test_spawn_ignores_an_unknown_permission_mode():
+    """The CLI refuses to start on an unknown --permission-mode, so the
+    historic "default" must mean "do not pass the flag"."""
+    d = make_daemon("s.json", away=True)
+    d.cfg["spawn"] = {"enabled": True, "permission_mode": "default",
+                      "command": "claude-stub"}
+    command = d.spawn_command("почини")
+    assert "--permission-mode" not in command, command
+    print("PASS an unknown permission mode is dropped, not passed on")
+
+
+def test_service_topics_take_no_tasks():
+    """The limits and status topics belong to no project, so text written
+    there used to pile up in a queue nothing would ever drain."""
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][d.USAGE_KEY] = 99
+    d.deliver_text("а тут что", 99, {"chat": {"id": -100},
+                                     "message_thread_id": 99})
+    assert d.queue == {}, d.queue
+    print("PASS a service topic does not collect tasks")
+
+
+def test_spawn_does_not_inherit_the_session_that_started_the_daemon():
+    """Seen live: an agent spawned into an empty sandbox described another
+    project's folders as its own, because the daemon had been started from a
+    hook and carried that session's environment into it."""
+    d = make_daemon("s.json", away=False)
+    original = dict(os.environ)
+    os.environ.update({"CLAUDECODE": "1", "CLAUDE_SESSION_ID": "abc",
+                       "CLAUDE_CODE_CHILD_SESSION": "1",
+                       "ANTHROPIC_MODEL": "claude-opus-5[1m]",
+                       "PATH": original.get("PATH", ""), "KEEP_ME": "yes"})
+    try:
+        env = d.spawn_env()
+        assert "CLAUDECODE" not in env and "CLAUDE_SESSION_ID" not in env, env
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env, "child-session flag leaked"
+        assert "ANTHROPIC_MODEL" not in env, "the parent's model pin leaked"
+        assert env.get("KEEP_ME") == "yes", "unrelated variables must survive"
+        assert env.get("PATH"), "PATH must survive or claude cannot be found"
+
+        # Started normally (no session around), the user's own vars are theirs.
+        del os.environ["CLAUDECODE"]
+        plain = d.spawn_env()
+        assert plain.get("ANTHROPIC_MODEL") == "claude-opus-5[1m]", plain
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+    print("PASS a spawned agent starts without the parent session's environment")
+
+
+def test_spawn_reports_a_binary_that_will_not_start():
+    """The launch failure has to reach the chat: the hooks report a session
+    that started, and a spawn that never started has no hooks to speak for it."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.spawning = {key}
+    d.run_spawn(key, ["claude-that-is-not-installed", "-p", "почини"],
+                os.path.dirname(os.path.abspath(__file__)), "почини")
+    body = "\n".join(m["text"] for m in d.bot.sent)
+    assert "🛑" in body, d.bot.sent
+    assert key not in d.spawning, "a failed spawn must not block the next one"
+    assert not d.bot.sent[-1]["silent"], "a launch failure must notify"
+    print("PASS a spawn that cannot start says so and unblocks the project")
+
+
+def test_stats_stay_bounded():
+    d = make_daemon("s.json", away=False)
+    d.cfg["stats_retention_days"] = 3
+    d.state["stats"] = {f"2026-01-{day:02d}": {"x": {"turns": 1}}
+                        for day in range(1, 21)}
+    d.bump_stat(cfgmod.normalize(PROJECT), "turns", 1)
+    days = sorted(d.state["stats"])
+    assert len(days) == 3, days                    # the window counts today in
+    assert days[:2] == ["2026-01-19", "2026-01-20"], days
+    assert days[-1] == time.strftime("%Y-%m-%d"), days
+    print("PASS the daily tallies are pruned to the retention window")
+
+
+def test_spawn_toggle_reads_as_off_by_default():
+    """get_setting used to answer True for any missing nested key — on
+    spawn.enabled that would have advertised remote execution as on."""
+    d = make_daemon("s.json", away=False)
+    d.cfg["spawn"] = {}
+    assert d.get_setting("spawn.enabled") is False
+    assert d.get_setting("watchdog.enabled") is True
+    print("PASS a missing nested toggle reads as its shipped default")
+
+
+# Trimmed from a live answer of /api/oauth/usage, keys and shapes intact.
+USAGE_PAYLOAD = {
+    "five_hour": {"utilization": 95.0,
+                  "resets_at": "2026-07-30T18:20:00.832597+00:00",
+                  "limit_dollars": None},
+    "seven_day": {"utilization": 53.0,
+                  "resets_at": "2026-08-03T13:00:00.832616+00:00"},
+    "seven_day_opus": None,
+    "limits": [
+        {"kind": "session", "group": "session", "percent": 95,
+         "severity": "critical", "resets_at": "2026-07-30T18:20:00.832597+00:00",
+         "scope": None, "is_active": True},
+        {"kind": "weekly_all", "group": "weekly", "percent": 53,
+         "severity": "normal", "resets_at": "2026-08-03T13:00:00.832616+00:00",
+         "scope": None, "is_active": False},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 18,
+         "severity": "normal", "resets_at": "2026-08-03T12:59:59.832894+00:00",
+         "scope": {"model": {"id": None, "display_name": "Fable"},
+                   "surface": None}, "is_active": False},
+    ],
+}
+
+
+def test_usage_payload_maps_onto_the_status_line_shape():
+    limits = usage.windows_from(USAGE_PAYLOAD)
+    assert limits["five_hour"]["used_percentage"] == 95.0, limits
+    assert limits["seven_day"]["used_percentage"] == 53.0, limits
+    # ISO-8601 with an offset must become the epoch seconds usage.when() eats
+    assert isinstance(limits["five_hour"]["resets_at"], float), limits
+    assert usage.when(limits["five_hour"]["resets_at"]), "reset time unreadable"
+    print("PASS the usage answer maps onto the status line's own shape")
+
+
+def test_usage_payload_carries_the_fable_pool():
+    """The per-model window only ever appears as a scoped weekly entry, and
+    the widget reads it from a nested section named after the pool."""
+    limits = usage.windows_from(USAGE_PAYLOAD)
+    assert limits["fable"]["seven_day"]["used_percentage"] == 18.0, limits
+    assert "five_hour" not in limits["fable"], "Fable has no 5-hour window"
+    print("PASS the scoped weekly window lands in the Fable pool")
+
+
+def test_usage_payload_without_limits_is_not_stored():
+    assert usage.windows_from({"limits": [], "five_hour": None}) == {}
+    print("PASS an empty usage answer maps to nothing")
+
+
+def test_expired_credentials_are_refused():
+    """An expired token would only earn a 401; the CLI rewrites the file when
+    it refreshes, so the next read picks the new one up."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "test-credentials.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"claudeAiOauth": {"accessToken": "secret",
+                                     "expiresAt": (time.time() - 60) * 1000}}, f)
+    assert usage.access_token(path) is None
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"claudeAiOauth": {"accessToken": "secret",
+                                     "expiresAt": (time.time() + 600) * 1000}}, f)
+    assert usage.access_token(path) == "secret"
+    os.remove(path)
+    print("PASS an expired CLI token is not used")
+
+
+def test_fresh_status_line_keeps_the_poll_quiet():
+    """The status line stays the primary source: a cache it just wrote must
+    stop the daemon from spending a request."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "test-usage.json")
+    usage.store({"captured_at": time.time(), "rate_limits": {"five_hour": {}},
+                 "has_limits": True}, path)
+    assert usage.status_line_fresh(45, path) is True
+    usage.store({"captured_at": time.time() - 600, "rate_limits": {},
+                 "has_limits": True}, path)
+    assert usage.status_line_fresh(45, path) is False
+    os.remove(path)
+    print("PASS a freshly written cache suppresses the poll")
+
+
+def test_the_polls_own_output_does_not_suppress_the_next_poll():
+    """Measured live: counting our own record as a fresh status line stretched
+    the refresh from the configured 30s out to the 45s staleness window."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "test-usage.json")
+    usage.store({"captured_at": time.time(), "rate_limits": {"five_hour": {}},
+                 "has_limits": True, "source": "oauth"}, path)
+    assert usage.status_line_fresh(45, path) is False
+    os.remove(path)
+    print("PASS the poll does not mistake its own output for the status line")
+
+
+def test_usage_poll_sleeps_on_every_path():
+    """A `continue` that skipped the sleep turned this thread into a busy
+    loop that pinned a core for as long as the cache stayed fresh."""
+    d = make_daemon("s.json", away=False)
+    d.cfg["usage_poll"] = {"enabled": True, "interval_seconds": 30}
+    naps, calls = [], []
+    original_sleep, original_fresh = daemon_module.time.sleep, usage.status_line_fresh
+    daemon_module.time.sleep = lambda s: (naps.append(s),
+                                          calls.append(1),
+                                          (_ for _ in ()).throw(StopIteration)
+                                          if len(calls) > 3 else None)[-1]
+    usage.status_line_fresh = lambda *a, **k: True      # nothing to fetch
+    try:
+        d.usage_poll_forever()
+    except StopIteration:
+        pass
+    finally:
+        daemon_module.time.sleep = original_sleep
+        usage.status_line_fresh = original_fresh
+    assert naps and all(n >= 10 for n in naps), naps
+    print("PASS the usage poll sleeps on every path, fresh cache included")
+
+
+def test_report_includes_a_scoped_pool():
+    """A spent Fable window used to be invisible outside the widget: the
+    report only ever walked the two shared windows."""
+    body = usage.report({"rate_limits": {
+        "five_hour": {"used_percentage": 12.0},
+        "seven_day": {"used_percentage": 20.0},
+        "fable": {"seven_day": {"used_percentage": 95.0}}}})
+    assert "95%" in body and "Fable" in body, body
+    assert body.index("20%") < body.index("95%"), "shared windows come first"
+    print("PASS the limits report carries the per-model pool too")
+
+
+def test_report_without_a_scoped_pool_is_unchanged():
+    body = usage.report({"rate_limits": {"five_hour": {"used_percentage": 12.0}}})
+    assert body.count("\n") == 0 and "12%" in body, body
+    print("PASS a report with no scoped pool stays a plain two-window report")
+
+
+def test_the_suite_never_writes_the_real_config():
+    """A guard, not a feature test. The daemon persists config on /register,
+    /projects and every settings change; if those paths ever point at the
+    installed config.json again, a test run wipes the live bot token."""
+    real = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config.json")
+    assert os.path.abspath(cfgmod.PATH) != os.path.abspath(real), cfgmod.PATH
+    assert "tests" in os.path.abspath(cfgmod.PATH), cfgmod.PATH
+    assert "tests" in os.path.abspath(cfgmod.STATE_PATH), cfgmod.STATE_PATH
+
+    # Prove it by writing: the redirection used to be defeated by `path=PATH`
+    # default arguments, which bind at import time and ignore the reassignment.
+    before = open(real, encoding="utf-8").read() if os.path.exists(real) else None
+    d = make_daemon("s.json", away=False)
+    d.apply_settings({"git_summary": False})
+    d.select_projects([cfgmod.normalize(PROJECT)])
+    d.on_command("/register", 4242, None, {"chat": {"id": 4242}})
+    after = open(real, encoding="utf-8").read() if os.path.exists(real) else None
+    assert before == after, "a test run rewrote the installed config.json"
+    print("PASS the suite writes its config and state inside tests/")
 
 
 if __name__ == "__main__":

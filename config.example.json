@@ -1,7 +1,7 @@
 {
-  "_комментарий": "Скопируй в config.json и вставь токен от @BotFather. chat_id подставится сам после команды /register в группе.",
+  "_comment": "Copy to config.json and paste the token from @BotFather. chat_id fills itself in once you send /register in the group.",
 
-  "bot_token": "СЮДА_ТОКЕН_ОТ_BOTFATHER",
+  "bot_token": "PASTE_THE_BOTFATHER_TOKEN_HERE",
   "chat_id": null,
   "language": null,
 
@@ -23,10 +23,21 @@
   "git_summary": true,
 
   "usage_report": { "enabled": true, "max_age_seconds": 3600 },
+
+  "_usage_poll_comment": "Claude Code renders the status line only in its terminal UI, so a VSCode-only setup never gets limit data. Turn this on to let the daemon ask /api/oauth/usage itself, using the CLI's own token from ~/.claude/.credentials.json. It is the only part of the bridge that touches a credential.",
+  "usage_poll": { "enabled": false, "interval_seconds": 30, "stale_after_seconds": 45, "timeout_seconds": 10 },
+
   "status_monitor": { "enabled": true, "interval_seconds": 300, "components": [] },
   "watchdog": { "enabled": true, "minutes": 20 },
   "daily_digest": { "enabled": true, "hour": 21 },
+  "stats_retention_days": 14,
 
-  "spawn": { "enabled": false, "permission_mode": "default" },
+  "_spawn_comment": "Runs `claude -p` for a project with no live session. Remote code execution driven by a chat message — leave it off unless you mean it.",
+  "spawn": {
+    "enabled": false,
+    "permission_mode": "acceptEdits",
+    "model": null,
+    "timeout_seconds": 7200
+  },
   "debug_hooks": false
 }

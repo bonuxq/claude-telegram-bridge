@@ -9,8 +9,10 @@ English and never crashes a message. The language comes from config.json
 import locale
 import os
 
-LANG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "lang")
+from .paths import in_resources
+
+# Read-only, and shipped inside the build: resources, not the app dir.
+LANG_DIR = in_resources("lang")
 LANGUAGES = ("en", "ru", "uk", "ko", "zh", "vi", "el", "pt", "es")
 NATIVE = {"en": "English", "ru": "Русский", "uk": "Українська", "ko": "한국어",
           "zh": "中文", "vi": "Tiếng Việt", "el": "Ελληνικά",

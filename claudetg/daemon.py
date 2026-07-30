@@ -8,6 +8,7 @@ would steal each other's answers with a 409.
 import html
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -15,13 +16,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
-from . import discover, i18n, render, status, transcript, usage
+from . import discover, hooks, i18n, paths, render, status, transcript, usage
 from .i18n import t
 from .tgapi import Bot, TelegramError
 
 LOG_LOCK = threading.Lock()
-LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "daemon.log")
+LOG_PATH = paths.in_app("daemon.log")
 LOG_MAX_BYTES = 2_000_000
 
 
@@ -79,6 +79,7 @@ class Daemon:
         self.by_topic = {}          # topic id -> waiter id (newest wins)
         self.queue = {}             # project key -> [pending task texts]
         self.queue.update(self.state.get("queue", {}))
+        self.spawning = set()       # project keys with a headless agent running
 
     # -- persistence ----------------------------------------------------
 
@@ -92,6 +93,15 @@ class Daemon:
         return bool(self.state.get("away"))
 
     # -- topics ---------------------------------------------------------
+
+    def linked(self):
+        """Telegram is configured and bound to a group.
+
+        Everything else runs without it: the widget, the rate-limit meters,
+        the hooks, the queue. Only the reporting has nowhere to go — and
+        attempting it anyway costs a network timeout on every single event.
+        """
+        return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
 
     def topic_for(self, project_key, project_name):
         """Return the forum topic id for a project, creating it on first use."""
@@ -112,6 +122,8 @@ class Daemon:
 
     def send(self, project_key, project_name, text, markup=None, silent=None):
         """Send rendered HTML to a project's topic. Returns message ids."""
+        if not self.linked():
+            return []       # not set up yet: stay silent instead of timing out
         thread = self.topic_for(project_key, project_name)
         if silent is None:
             silent = not self.away
@@ -264,11 +276,23 @@ class Daemon:
     def bump_stat(self, key, field, seconds=0.0):
         today = time.strftime("%Y-%m-%d")
         with self.lock:
-            day = self.state.setdefault("stats", {}).setdefault(today, {})
+            stats = self.state.setdefault("stats", {})
+            day = stats.setdefault(today, {})
             entry = day.setdefault(key, {"turns": 0, "failures": 0, "seconds": 0.0})
             entry[field] = entry.get(field, 0) + 1
             entry["seconds"] = entry.get("seconds", 0.0) + (seconds or 0.0)
+            self.prune_stats(stats, today)
         self.persist()
+
+    def prune_stats(self, stats, today):
+        """Keep the tallies bounded: state.json is rewritten on every turn and
+        only the digest reads them, one day at a time. Caller holds the lock."""
+        days = int(self.cfg.get("stats_retention_days", 14) or 0)
+        if days <= 0 or len(stats) <= days:
+            return
+        keep = set(sorted(stats)[-days:]) | {today}
+        for day in [d for d in stats if d not in keep]:
+            stats.pop(day, None)
 
     def watchdog_forever(self, minutes):
         limit = max(60, int(minutes) * 60)
@@ -383,6 +407,50 @@ class Daemon:
             return
         self.send(self.USAGE_KEY, t("topic.usage"),
                   render.render(body, header=t("usage.header")), silent=True)
+
+    def usage_poll_forever(self):
+        """Keep the rate-limit cache fresh when the status line never runs.
+
+        Claude Code renders the status line only in its terminal UI, so a
+        VSCode-only setup writes usage.json exactly never. The poll fills that
+        gap and stays out of the way otherwise: a cache the status line just
+        wrote is left alone.
+        """
+        failures = 0
+        while True:
+            cfg = self.cfg.get("usage_poll") or {}
+            interval = max(10, int(cfg.get("interval_seconds", 30)))
+            delay = interval
+            # One sleep, at the bottom, on every path: an early `continue`
+            # here turns the whole thread into a busy loop.
+            if cfg.get("enabled", False):
+                try:
+                    if usage.status_line_fresh(
+                            int(cfg.get("stale_after_seconds", 45))):
+                        failures = 0        # the status line is doing the work
+                    else:
+                        record = usage.fetch_live(
+                            timeout=int(cfg.get("timeout_seconds", 10)))
+                        if record:
+                            usage.store(record)
+                            if failures:
+                                log("usage poll recovered")
+                            failures = 0
+                        else:
+                            failures += 1   # no token yet, or nothing to store
+                except usage.UsageError as e:
+                    failures += 1
+                    if failures in (1, 5):  # once when it breaks, once when stuck
+                        log("usage poll failed:", e)
+                except Exception as e:
+                    failures += 1
+                    log("usage poll error:", type(e).__name__, e)
+                # Backing off keeps an expired token or a dead network from
+                # turning into two requests a minute for the rest of the day.
+                delay = min(interval * (2 ** min(failures, 5)), 900)
+            else:
+                failures = 0
+            time.sleep(delay)
 
     # -- status page ----------------------------------------------------
 
@@ -752,6 +820,146 @@ class Daemon:
             if self.by_topic.get(topic) == waiter.id:
                 self.by_topic.pop(topic, None)
 
+    # -- headless spawn ---------------------------------------------------
+
+    # The CLI validates the mode itself and refuses to start on an unknown
+    # value, so anything outside this set means "omit the flag entirely".
+    SPAWN_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual",
+                   "dontAsk", "plan")
+
+    def spawn_cfg(self):
+        return self.cfg.get("spawn") or {}
+
+    def live_session(self, key):
+        with self.lock:
+            return any(s.get("alive") and s.get("project") == key
+                       for s in self.sessions.values())
+
+    def spawn_cwd(self, key):
+        """The directory a spawned agent should run in, or None.
+
+        Auto-discovered projects are keyed by their transcript folder under
+        ~/.claude/projects, which is not the project tree; those can only be
+        queued. A picked project carries its real path as the key.
+        """
+        meta = (self.cfg.get("projects") or {}).get(key)
+        if meta is None:
+            return None
+        for root in cfgmod.roots_of(key, meta):
+            if os.path.isdir(root):
+                return root
+        return None
+
+    def spawn_command(self, task):
+        cfg = self.spawn_cfg()
+        binary = cfg.get("command") or shutil.which("claude")
+        if not binary:
+            return None
+        command = [binary, "-p", task]
+        if cfg.get("permission_mode") in self.SPAWN_MODES:
+            command += ["--permission-mode", cfg["permission_mode"]]
+        if cfg.get("model"):
+            command += ["--model", str(cfg["model"])]
+        return command
+
+    # Everything Claude Code exports to describe the session it is running:
+    # ids, entrypoint, effort, permission dirs, and the model pins.
+    INHERITED_PREFIXES = ("CLAUDE_",)
+    INHERITED_NAMES = ("CLAUDECODE", "ANTHROPIC_MODEL",
+                       "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                       "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                       "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+
+    def spawn_env(self):
+        """Environment for a spawned agent, with the parent session stripped.
+
+        The daemon is usually started by a hook, which runs inside a live
+        Claude Code session, so its environment describes that session: its id,
+        its model pin, its extra working directories. Handing that to a new
+        agent makes it a continuation of a session it has nothing to do with —
+        seen live, an agent in an empty sandbox listed another project's
+        folders as its own. CLAUDECODE is the marker that the environment came
+        from a session at all; without it, the user's own variables are left
+        exactly as they are.
+        """
+        env = dict(os.environ)
+        if not env.get("CLAUDECODE"):
+            return env
+        for name in list(env):
+            if name.startswith(self.INHERITED_PREFIXES) or name in self.INHERITED_NAMES:
+                del env[name]
+        return env
+
+    def project_name(self, key):
+        meta = (self.cfg.get("projects") or {}).get(key) or {}
+        with self.lock:
+            auto = (self.state.get("auto_names") or {}).get(key)
+        return (meta.get("name") or auto or os.path.basename(key.rstrip("/"))
+                or t("project.fallback"))
+
+    def try_spawn(self, key, task, message=None):
+        """Give a task a session to land in when none exists.
+
+        The spawned agent is an ordinary Claude Code session, so the installed
+        hooks report it back through this very bridge — the live text, the
+        closing summary and the git note all arrive with no special handling
+        here. Returns True when the task was taken; False leaves it queued.
+        """
+        if not self.spawn_cfg().get("enabled"):
+            return False
+        if self.live_session(key):
+            return False        # someone is listening: the queue is cheaper
+        cwd = self.spawn_cwd(key)
+        if not cwd:
+            return False
+        with self.lock:
+            if key in self.spawning:
+                return False    # one agent per project; the rest waits in line
+            self.spawning.add(key)
+        command = self.spawn_command(task)
+        if not command:
+            with self.lock:
+                self.spawning.discard(key)
+            log("spawn: no claude executable on PATH")
+            self.send(key, self.project_name(key), t("spawn.nocli"), silent=False)
+            return False
+        threading.Thread(target=self.run_spawn, args=(key, command, cwd, task),
+                         daemon=True).start()
+        if message:
+            self.ack(message, t("ack.spawned"))
+        return True
+
+    def run_spawn(self, key, command, cwd, task):
+        name = self.project_name(key)
+        self.send(key, name, t("spawn.started", name=html.escape(name),
+                               task=html.escape(task[:200])), silent=True)
+        timeout = int(self.spawn_cfg().get("timeout_seconds") or 0) or None
+        log(f"spawn: {name} in {cwd}")
+        try:
+            result = subprocess.run(
+                command, cwd=cwd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout,
+                stdin=subprocess.DEVNULL, env=self.spawn_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            self.send(key, name, t("spawn.timeout",
+                                   minutes=int((timeout or 0) // 60)), silent=False)
+            return
+        except (OSError, subprocess.SubprocessError) as e:
+            self.send(key, name, t("spawn.failed",
+                                   error=html.escape(str(e)[:300])), silent=False)
+            return
+        finally:
+            with self.lock:
+                self.spawning.discard(key)
+        if result.returncode == 0:
+            return              # the hooks already reported the whole run
+        detail = (result.stderr or result.stdout or "").strip()[:1000]
+        head = render.header("🛑", t("spawn.failed.head", name=name))
+        self.send(key, name, render.render(
+            f"```\n{detail}\n```" if detail else t("spawn.failed.empty"),
+            header=head), silent=False)
+
     def take_queue(self, key):
         with self.lock:
             items = self.queue.pop(key, [])
@@ -774,6 +982,11 @@ class Daemon:
         # answers HTTP while being deaf to Telegram, which looks healthy and
         # is not.
         while True:
+            if not self.cfg.get("bot_token"):
+                # Fresh install: the daemon is up so the widget can reach it
+                # and hand it a token. Until then there is nothing to poll.
+                time.sleep(2)
+                continue
             try:
                 self.poll_once()
             except TelegramError as e:
@@ -827,7 +1040,9 @@ class Daemon:
             self.answer_by_text(waiter, text, message)
             return
         key = self.project_by_topic(thread)
-        if not key:
+        if not key or key in {k for k, _ in self.SERVICE_TOPICS}:
+            return      # the limits and status topics own no session to task
+        if self.try_spawn(key, text, message):
             return
         with self.lock:
             self.queue.setdefault(key, []).append(text)
@@ -900,14 +1115,14 @@ class Daemon:
     def on_command(self, text, chat_id, thread, message):
         cmd = text.split()[0].split("@")[0]
         if cmd == "/register":
-            self.cfg["chat_id"] = chat_id
-            cfgmod.save(self.cfg)
-            self.bot.send_message(chat_id, t("register.ok"), thread_id=thread)
-            self.refresh_status()
-            return
+            return self.on_register(chat_id, thread)
         if self.cfg["chat_id"] and chat_id != self.cfg["chat_id"]:
             return  # commands are only honoured in the registered group
-        if cmd in ("/away", "/here"):
+        if cmd in ("/help", "/start"):
+            self.bot.send_message(chat_id, t("help.text"), thread_id=thread)
+        elif cmd == "/unregister":
+            self.on_unregister(chat_id, thread)
+        elif cmd in ("/away", "/here"):
             self.set_away(cmd == "/away")
         elif cmd == "/status":
             self.bot.send_message(chat_id, self.status_text(), thread_id=thread)
@@ -925,6 +1140,39 @@ class Daemon:
                 total = {k: len(v) for k, v in self.queue.items() if v}
             self.bot.send_message(chat_id, t("queue.show", items=total or t("queue.empty")),
                                   thread_id=thread)
+
+    def on_register(self, chat_id, thread):
+        """Binding is deliberately one-way.
+
+        A bot's username is discoverable, its token is not needed to talk to
+        it, and an unguarded /register from a stranger's chat would silently
+        redirect every session's contents there. Rebinding requires
+        /unregister from the chat that currently owns the bridge.
+        """
+        bound = self.cfg.get("chat_id")
+        if bound and bound != chat_id:
+            log(f"/register refused: bound to {bound}, requested from {chat_id}")
+            return  # no reply: an outsider learns nothing about this bridge
+        if bound == chat_id:
+            self.bot.send_message(chat_id, t("register.already"), thread_id=thread)
+            return
+        self.cfg["chat_id"] = chat_id
+        cfgmod.save(self.cfg)
+        self.bot.send_message(chat_id, t("register.ok"), thread_id=thread)
+        self.ensure_service_topics()
+        self.refresh_status()
+
+    def on_unregister(self, chat_id, thread):
+        """Release the binding, and forget the topic ids with it: they belong
+        to this group and mean nothing in the next one."""
+        self.bot.send_message(chat_id, t("register.cleared"), thread_id=thread)
+        self.cfg["chat_id"] = None
+        cfgmod.save(self.cfg)
+        with self.lock:
+            self.state["topics"] = {}
+            self.state["status_message_id"] = None
+        self.persist()
+        log("unregistered: group binding and topic ids cleared")
 
     def show_projects(self, chat_id, thread, message_id=None):
         """Picker: one tappable row per known project, ✅ = bridged."""
@@ -999,6 +1247,7 @@ class Daemon:
         "live_messages",
         "report_tool_failures",
         "usage_report.enabled",
+        "usage_poll.enabled",
         "status_monitor.enabled",
         "watchdog.enabled",
         "daily_digest.enabled",
@@ -1010,6 +1259,7 @@ class Daemon:
         "log_when_present.usage",
         "log_when_present.notification",
         "auto_discover",
+        "spawn.enabled",
         "debug_hooks",
     ]
 
@@ -1019,7 +1269,10 @@ class Daemon:
             return tail in (self.cfg.get(head) or [])
         value = self.cfg.get(head)
         if tail:
-            return bool((value or {}).get(tail, True))
+            # A config that spells out a section without the key must read as
+            # the shipped default, not as "on" — spawn.enabled defaults off.
+            fallback = (cfgmod.DEFAULTS.get(head) or {}).get(tail, True)
+            return bool((value or {}).get(tail, fallback))
         return bool(value)
 
     def set_setting(self, path, enabled):
@@ -1053,6 +1306,79 @@ class Daemon:
         cfgmod.save(self.cfg)
         log("settings updated:", ", ".join(f"{k}={v}" for k, v in (patch or {}).items()))
         return self.settings_snapshot()
+
+    # -- Telegram setup, driven from the widget --------------------------
+
+    def telegram_state(self):
+        """What the setup screen needs to show. Never the token itself: the
+        widget only has to know whether one is there, not what it is."""
+        token = self.cfg.get("bot_token") or ""
+        state = {"has_token": bool(token),
+                 "token_hint": f"…{token[-4:]}" if len(token) > 4 else "",
+                 "chat_id": self.cfg.get("chat_id"),
+                 "username": self.state.get("bot_username") or ""}
+        with self.lock:
+            state["topics"] = len([k for k in self.state.get("topics", {})
+                                   if not k.startswith("__")])
+        return state
+
+    def set_token(self, token):
+        """Adopt a token after Telegram itself confirms it works.
+
+        Rejecting a bad token here rather than at startup is the whole point
+        of the setup screen: the user pastes, sees the bot's name, and knows
+        it took — instead of a daemon that quietly refuses to start.
+        """
+        token = (token or "").strip()
+        if not token:
+            return {"ok": False, "error": t("setup.err.empty")}
+        try:
+            me = Bot(token).get_me()
+        except TelegramError as e:
+            log("token rejected:", e)
+            return {"ok": False, "error": t("setup.err.rejected")}
+        except Exception as e:                       # no network, DNS, proxy
+            log("token check failed:", type(e).__name__, e)
+            return {"ok": False, "error": t("setup.err.offline")}
+
+        changed = token != self.cfg.get("bot_token")
+        self.cfg["bot_token"] = token
+        if changed:
+            # A different bot means a different chat and different topic ids;
+            # keeping them would post into threads that are not ours.
+            self.cfg["chat_id"] = None
+            with self.lock:
+                self.state["topics"] = {}
+                self.state["status_message_id"] = None
+                self.state["offset"] = None
+        with self.lock:
+            self.state["bot_username"] = me.get("username") or ""
+        self.bot = Bot(token)
+        cfgmod.save(self.cfg)
+        self.persist()
+        log(f"token accepted: @{me.get('username')}"
+            + (" (binding reset)" if changed else ""))
+        return {"ok": True, "username": me.get("username") or "",
+                "chat_id": self.cfg.get("chat_id")}
+
+    def hooks_state(self):
+        state = hooks.status()
+        state["ready"] = state["hooks"] >= state["expected"]
+        return state
+
+    def install_hooks(self, enable=True):
+        """The one step that used to need a terminal."""
+        try:
+            timeout = int(self.cfg.get("hook_timeout_seconds", 3600))
+            result = (hooks.install(timeout) if enable else hooks.uninstall())
+            log("hooks installed" if enable else "hooks removed",
+                f"(backup: {result.get('backup')})" if result.get("backup") else "")
+        except OSError as e:
+            log("hook install failed:", e)
+            return {"ok": False, "error": str(e)[:200]}
+        state = self.hooks_state()
+        state["ok"] = True
+        return state
 
     def project_catalogue(self):
         return discover.list_projects(cfg=self.cfg)
@@ -1121,6 +1447,8 @@ class Daemon:
         return len(waiters)
 
     def refresh_status(self):
+        if not self.linked():
+            return
         markup = {"inline_keyboard": [[{
             "text": t("pin.here") if self.away else t("pin.away"),
             "callback_data": "mode",
@@ -1230,6 +1558,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/settings"):
             return self._reply(
                 {"settings": self.daemon_ref.apply_settings(data.get("settings") or {})})
+        if self.path.startswith("/telegram"):
+            result = self.daemon_ref.set_token(data.get("token"))
+            result.update(self.daemon_ref.telegram_state())
+            return self._reply(result)
+        if self.path.startswith("/hooks"):
+            return self._reply(
+                self.daemon_ref.install_hooks(bool(data.get("enable", True))))
         try:
             result = self.daemon_ref.handle_event(data)
         except Exception as e:
@@ -1244,6 +1579,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply({"projects": self.daemon_ref.project_catalogue()})
         if self.path.startswith("/settings"):
             return self._reply({"settings": self.daemon_ref.settings_snapshot()})
+        if self.path.startswith("/telegram"):
+            return self._reply(self.daemon_ref.telegram_state())
+        if self.path.startswith("/hooks"):
+            return self._reply(self.daemon_ref.hooks_state())
         self._reply({"ok": True})
 
     def log_message(self, *_):
@@ -1261,9 +1600,6 @@ class SingleInstanceServer(ThreadingHTTPServer):
 def main():
     cfg = cfgmod.load()
     i18n.set_language(cfg.get("language"))
-    if not cfg["bot_token"]:
-        raise SystemExit(t("err.notoken"))
-
     try:
         server = SingleInstanceServer((cfg["host"], cfg["port"]), Handler)
     except OSError:
@@ -1272,11 +1608,20 @@ def main():
 
     daemon = Daemon(cfg)
     Handler.daemon_ref = daemon
-    me = daemon.bot.get_me()
-    log(f"bot @{me.get('username')} ready; away={daemon.away}")
-    if cfg["chat_id"]:
-        daemon.ensure_service_topics()
-        daemon.refresh_status()
+    if cfg.get("bot_token"):
+        try:
+            me = daemon.bot.get_me()
+            daemon.state["bot_username"] = me.get("username") or ""
+            log(f"bot @{me.get('username')} ready; away={daemon.away}")
+        except (TelegramError, OSError) as e:
+            # Never fatal: the widget's setup screen is how a bad or expired
+            # token gets replaced, and it can only reach a daemon that runs.
+            log("token not usable yet:", e)
+        if cfg["chat_id"]:
+            daemon.ensure_service_topics()
+            daemon.refresh_status()
+    else:
+        log("no bot token yet — waiting for the setup screen")
 
     threading.Thread(target=daemon.poll_forever, daemon=True).start()
 
@@ -1294,7 +1639,8 @@ def main():
     threading.Thread(target=daemon.digest_forever,
                      args=((cfg.get("daily_digest") or {}).get("hour", 21),),
                      daemon=True).start()
-    log("background workers started (status, watchdog, digest)")
+    threading.Thread(target=daemon.usage_poll_forever, daemon=True).start()
+    log("background workers started (status, watchdog, digest, usage)")
 
     log(f"listening on http://{cfg['host']}:{cfg['port']}")
     server.serve_forever()

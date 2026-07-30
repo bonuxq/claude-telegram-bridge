@@ -14,7 +14,9 @@ import os
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = (os.path.dirname(os.path.abspath(sys.executable))
+        if getattr(sys, "frozen", False)
+        else os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from claudetg import i18n  # noqa: E402
 from claudetg.i18n import t  # noqa: E402

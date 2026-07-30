@@ -14,7 +14,9 @@ import time
 import urllib.error
 import urllib.request
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = (os.path.dirname(os.path.abspath(sys.executable))
+        if getattr(sys, "frozen", False)
+        else os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(ROOT, "config.json")
 
 
@@ -53,7 +55,7 @@ def main():
     event = data.get("hook_event_name")
     cwd = data.get("cwd") or ""
     if not in_scope(cfg, cwd, data.get("transcript_path")):
-        trace(cfg, event, "SKIP (вне списка)", cwd)
+        trace(cfg, event, "SKIP (not a bridged project)", cwd)
         bail()
     trace(cfg, event, "->", cwd)
 
@@ -63,10 +65,10 @@ def main():
 
     result = post(url, data, timeout)
     if result is None and cfg.get("autostart", True):
-        trace(cfg, event, "демон не ответил, поднимаю")
+        trace(cfg, event, "no answer from the daemon, starting it")
         if start_daemon(cfg):
             result = post(url, data, timeout)
-    trace(cfg, event, "ответ демона:", json.dumps(result, ensure_ascii=False)[:200])
+    trace(cfg, event, "daemon replied:", json.dumps(result, ensure_ascii=False)[:200])
     if not result:
         bail()
 

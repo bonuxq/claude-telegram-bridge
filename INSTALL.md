@@ -1,144 +1,161 @@
-# Установка
+# Install
 
-Мост между Claude Code и Telegram: опросники приходят кнопками, текст —
-по мере появления, ответ из чата продолжает работу.
+**English** · [Українська](INSTALL.uk.md) · [Русский](INSTALL.ru.md)
 
-**Зависимостей нет.** Нужен только Python 3.9+ и Claude Code. Ничего
-устанавливать через `pip` не требуется — всё на стандартной библиотеке.
+## The short version
 
----
+1. Download **`ClaudeTelegram-Setup.exe`** from the
+   [releases page](https://github.com/bonuxq/claude-telegram-bridge/releases)
+   and run it.
+2. The widget opens a setup screen. Follow the five steps in it.
 
-## Быстрый путь: поручить установку Claude Code
+That is the whole installation. No Python, no terminal, no editing files —
+the installer carries its own runtime and wires the Claude Code hooks itself.
 
-Распакуй архив, открой папку в Claude Code и вставь этот текст:
-
-> Установи мост Claude Code ↔ Telegram из этой папки. Сделай по шагам:
->
-> 1. Проверь `python --version` (нужен 3.9+).
-> 2. Скопируй `config.example.json` в `config.json` и подставь в `bot_token`
->    токен, который я сейчас пришлю.
-> 3. Запусти `python install.py` — он сделает резервную копию
->    `~/.claude/settings.json` и пропишет туда хуки и статус-строку.
-> 4. Запусти демон: `python -m claudetg.daemon` в фоне.
-> 5. Скажи мне отправить `/register` в моей Telegram-группе, дождись, пока
->    в `config.json` появится `chat_id`, и подтверди это.
-> 6. Запусти виджет: `python widget.pyw`.
-> 7. Прогони `python tests/test_flow.py` и покажи результат.
-> 8. Объясни, какие проекты подключены и как подключить остальные.
->
-> Токен в чат больше не выводи и в git не коммить: `config.json` уже в
-> `.gitignore`.
-
-Дальше — те же шаги вручную.
+Windows only. The daemon and the hooks are plain Python and would run
+anywhere, but the widget is built on Win32 APIs and there is no port.
 
 ---
 
-## 1. Бот
+## What the installer does
 
-1. Напиши [@BotFather](https://t.me/BotFather) команду `/newbot`.
-2. Придумай имя и username, получи токен вида `1234567890:AAF...`.
+- Installs into `%LOCALAPPDATA%\ClaudeTelegram` — **no administrator rights**.
+  It writes nothing outside your own profile.
+- Wires the Claude Code hooks and the status line into
+  `~/.claude/settings.json`, keeping a timestamped backup and leaving any
+  hooks of your own alone.
+- Optionally starts the bridge at login (a checkbox during setup).
+- Starts the daemon and the widget when it finishes.
 
-## 2. Группа
+Uninstalling removes the hooks again and deletes the program, but keeps
+`config.json`: a reinstall should not cost you the token and the project list.
 
-1. Создай **супергруппу** (не обычную группу и не канал).
-2. Настройки группы → включи **Темы** (Topics). Без них не будет разделения
-   по проектам.
-3. Добавь бота в группу.
-4. Сделай бота **администратором** — без прав он не сможет создавать темы.
+---
 
-## 3. Конфиг
+## The setup screen
+
+It opens by itself on a fresh install, and lives in the widget's menu under
+**Telegram…** afterwards.
+
+### 1. Create the bot
+
+Press **Open @BotFather**, send it `/newbot`, pick a display name and a
+username. It answers with a token that looks like `1234567890:AAF...`.
+
+### 2. Paste the token
+
+Into the field, then **Save and check**. The bridge asks Telegram whether the
+token works before storing it, so you find out immediately:
+
+- `Bot @yourbot is connected` — done.
+- `Telegram did not accept this token` — it is wrong or expired; the bridge
+  keeps the old one rather than saving a broken one.
+
+### 3. Create the group
+
+A **supergroup**, not a plain group or a channel. In its settings turn on
+**Topics** — the bridge gives every project a topic of its own, and without
+them there is nothing to separate.
+
+### 4. Add the bot as an admin
+
+Without admin rights it cannot create topics. Admin status also lets it read
+plain messages, which is why BotFather's privacy setting does not matter.
+
+### 5. Bind the group
+
+Send `/register` in the group. The bot confirms, and the **Claude status** and
+**Claude limits** topics appear by themselves.
+
+Binding is one-way on purpose: once bound, `/register` from any other chat is
+ignored, so finding your bot is not enough to redirect its reports. To move
+the bridge to another group, send `/unregister` in the current one first.
+
+### 6. Hooks
+
+The setup screen shows whether they are in place and installs them with one
+button. The installer already did this, so normally it just reads
+`Claude Code hooks are installed`.
+
+**Restart any VSCode windows that were open during the install** — they pick
+up the hooks on start.
+
+---
+
+## Choosing projects
+
+No paths to type. Widget menu → **Projects…**, or `/projects` in the chat:
+you get the list of projects Claude Code already knows, newest first. The
+checked ones get their own Telegram topic.
+
+That list is the privacy boundary — **an unchecked project sends nothing at
+all**.
+
+---
+
+## Running from source instead
+
+If you would rather not run a binary:
 
 ```bash
+git clone https://github.com/bonuxq/claude-telegram-bridge
+cd claude-telegram-bridge
 cp config.example.json config.json
+python install.py                 # hooks + status line
+python -m claudetg.daemon         # the daemon
+python widget.pyw                 # the widget
 ```
 
-Открой `config.json` и вставь токен в `bot_token`. `chat_id` не трогай —
-подставится сам.
+Python 3.9+ and nothing else — the whole bridge is standard library. The
+setup screen works exactly the same way from source.
 
-## 4. Установка хуков
+Building the installer yourself:
 
 ```bash
-python install.py
+pip install pyinstaller
+python -m PyInstaller claudetg.spec --noconfirm
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
-
-Что он делает:
-
-- копирует `~/.claude/settings.json` в `settings.json.backup-ГГГГММДД-ЧЧММСС`;
-- прописывает хуки моста (существующие чужие хуки не трогает);
-- настраивает статус-строку — это единственный источник данных об остатке
-  лимитов;
-- повторный запуск не плодит дубликаты.
-
-Откат: `python install.py --uninstall`.
-
-## 5. Запуск
-
-```bash
-python -m claudetg.daemon     # демон (одна копия; вторая откажется стартовать)
-python widget.pyw             # виджет с галочкой
-```
-
-Автозапуск при входе в Windows:
-
-```bash
-python install.py --autostart      # ярлыки в папке автозагрузки
-python install.py --no-autostart   # убрать
-```
-
-Демон умеет подниматься сам — из виджета или из первого же хука, — так что
-автозапуск нужен скорее для удобства.
-
-## 6. Привязка группы
-
-Отправь в группе `/register`. Бот ответит «Группа привязана», в `config.json`
-появится `chat_id`, а в группе — темы **«Статус Claude»** и **«Лимиты Claude»**.
-
-## 7. Проекты
-
-Пути вводить не нужно. В виджете нажми **«Проекты…»** или отправь боту
-`/projects` — появится список проектов, которые Claude Code уже знает.
-Отмеченные получают свою тему в Telegram.
-
-## 8. Проверка
-
-```bash
-python tests/test_flow.py     # 43 теста, все должны пройти
-```
-
-Живая проверка: сними галочку «Я за ПК» и дождись, пока Claude задаст вопрос —
-он должен прийти в Telegram кнопками, а не остаться в VSCode.
 
 ---
 
-## Если что-то не работает
+## When something does not work
 
-**В Telegram тишина.** Включи журнал: в виджете «Функции…» → «Журнал хуков»,
-затем `tail -f hooks.log`. Строка вида `Stop -> C:\путь\проект` означает, что
-хук сработал и дошёл до демона.
+**Nothing arrives in Telegram.** Check the setup screen first: it says
+whether the token is accepted, whether a group is bound, and whether the
+hooks are installed. Those three cover almost everything.
 
-**Хуки не срабатывают вообще.** Окно VSCode, открытое до установки, обычно
-подхватывает хуки на лету, но не всегда. Перезапусти окно.
+**Hooks do not fire.** A VSCode window opened before the install usually
+picks them up on the fly, but not always. Restart the window.
 
-**Тема проекта не появилась.** Тема создаётся при первом событии от сессии.
-Внутри длинного хода событий нет — мост говорит на границах хода.
+**The project topic never appeared.** A topic is created on the first event
+from a session. Inside a long turn there are no events — the bridge speaks at
+turn boundaries.
 
-**Нет темы «Лимиты Claude» / нет данных о лимитах.** Статус-строка
-инициализируется при старте сессии. Перезапусти окно VSCode и проверь, видна
-ли внизу строка вида `Opus 5  МойПроект  5ч ████░░░░░░ 43% →17:34`.
+**The limits stay empty.** Claude Code only renders the status line in its
+terminal UI, so a VSCode-only setup never feeds it. Turn on **Poll the limits
+myself** in Features — the daemon then asks for them directly every 30
+seconds. See [FEATURES.md](FEATURES.md#when-the-status-line-never-runs--usage_poll).
 
-**Демон не отвечает.** Смотри `daemon.log`. Если порт 8787 занят — демон уже
-запущен, второй не нужен.
+**The daemon does not answer.** Look in `daemon.log` next to the executable.
+If port 8787 is busy, the daemon is already running and a second one is not
+needed. The widget logs its own crashes to `widget.log` in the same folder.
+
+**Windows says "unknown publisher".** The build is not code-signed yet. You
+can check the sources and build it yourself with the commands above.
 
 ---
 
-## Безопасность
+## Security
 
-- `config.json` содержит токен бота и включён в `.gitignore` — **не коммить
-  его**. Утёкший токен даёт доступ к твоим переписке и уведомлениям.
-- Мост отправляет в Telegram содержимое работы: текст ответов, ошибки, списки
-  задач. В чат попадает только то, что относится к **отмеченным** проектам.
-- `auto_discover: true` снимает это ограничение и подключает любой проект
-  автоматически — удобно, но тогда наружу пойдёт содержимое всех сессий.
-- `spawn.enabled` (по умолчанию `false`) — запуск агента по сообщению из
-  Telegram. Не включай, не понимая последствий: это выполнение кода на твоей
-  машине по сообщению в чате.
+- `config.json` holds the bot token. A leaked token lets someone else read
+  your notifications and write into your group.
+- The bridge sends work content to Telegram: answer text, errors, todo lists.
+  Only **checked** projects reach the chat.
+- `auto_discover` bridges every project automatically — convenient, but then
+  the contents of every session on the machine go out.
+- `spawn` (off by default) starts an agent on a message from Telegram. That
+  is code execution on your machine driven by a chat message, so a leaked
+  token becomes the right to run an agent in your projects.
+- `usage_poll` (off by default) is the only part that touches a credential:
+  it reads the Claude Code OAuth token to ask Anthropic for your limits.

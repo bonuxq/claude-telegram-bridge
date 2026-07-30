@@ -1,173 +1,278 @@
-# Что умеет мост
+# What the bridge does
 
-Все переключатели — в виджете, кнопка **«Функции…»**. Менять `config.json`
-руками не нужно; изменения применяются сразу, без перезапуска.
+**English** · [Українська](FEATURES.uk.md) · [Русский](FEATURES.ru.md)
+
+Every switch below lives in the widget, under **Features…**. You never need to
+edit `config.json` by hand; changes apply instantly, with no restart.
 
 ---
 
-## Режим присутствия — основа всего
+## Presence mode — everything hangs off this
 
-Галочка в виджете (или `/away` и `/here` в боте).
+The checkbox in the widget (or `/away` and `/here` in the bot).
 
-| Галочка | Что происходит |
+| Checkbox | What happens |
 |---|---|
-| **стоит** — ты за ПК | всё приходит в Telegram **беззвучно**, ничего не блокируется, опросники остаются в VSCode |
-| **снята** — тебя нет | хуки **блокируют** сессию и ждут твоего ответа в Telegram до часа |
+| **checked** — you are at the PC | everything reaches Telegram **silently**, nothing blocks, questions stay in VSCode |
+| **unchecked** — you are away | hooks **block** the session and wait up to an hour for your answer in Telegram |
 
-Когда ты возвращаешься и ставишь галочку обратно, **все висящие ожидания
-немедленно освобождаются** — вопрос возвращается в VSCode, сессия не остаётся
-ждать чат, который ты уже не читаешь. Вручную то же самое делает `/release`.
-
----
-
-## Опросники кнопками
-
-Когда Claude задаёт вопрос с вариантами, он приходит в тему проекта кнопками.
-Работает и множественный выбор: отмечаешь несколько, жмёшь «Готово». Можно
-ответить и своим текстом — реплаем на сообщение с вопросом.
-
-Только в режиме «не за ПК». За ПК вопрос остаётся в редакторе.
-
-## Постановка задач с телефона
-
-Когда Claude заканчивает ход, в тему приходит сообщение с кнопками
-**«▶️ Продолжай»** и **«⏹ Достаточно»**. Любой твой текст в тему становится
-следующей задачей — сессия продолжает работу без тебя.
-
-Если ты не ответил за час, сессия просто останавливается. Написанное **позже**
-не теряется: Telegram хранит непрочитанное около суток, мост складывает такие
-сообщения в очередь и отдаёт их сессии при следующем ходе или запуске.
-Посмотреть очередь — `/queue`.
-
-**Чего он не умеет:** начать работу в сессии, которой не существует. Задача
-будет ждать в очереди, пока ты не откроешь проект.
+When you come back and check the box again, **every pending wait is released
+at once** — the question returns to VSCode instead of the session waiting on a
+chat you have stopped reading. `/release` does the same thing by hand.
 
 ---
 
-## Живой поток текста · `live_messages`
+## Questions as buttons
 
-Текст приходит **по мере появления**, а не пачкой в конце хода. Живые блоки
-помечены `💬`, в конце хода приходит короткая строка `✅ Проект · 1м 47с`.
+When Claude asks a multiple-choice question, it arrives in the project's topic
+as buttons. Multi-select works too: tick several, press «Done». You can also
+answer in your own words by replying to the question message.
 
-Поток идёт **всегда**, в том числе когда ты за ПК — просто беззвучно.
+Away mode only. At the PC the question stays in the editor.
 
-Формат сохраняется: жирный, инлайн-код, блоки кода с подсветкой. Длинные
-ответы режутся по границам абзацев и блоков кода, а не посреди строки.
-Markdown-таблицы превращаются в моноширинные с выровненными колонками —
-своих таблиц в Telegram нет.
+## Tasks from your phone
 
-## Список задач · `log_when_present.todo`
+When Claude finishes a turn, the topic gets a message with **«▶️ Continue»**
+and **«⏹ Enough»**. Any text you write into the topic becomes the next task —
+the session carries on without you.
 
-Todo-лист приходит **одним сообщением, которое редактируется на месте**:
-`✅` выполнено (зачёркнуто), `🔸` в работе, `▫️` в очереди, плюс счётчик `2/7`.
-Новых сообщений на каждое обновление не плодится.
+If you do not answer within the hour, the session simply stops. Anything you
+write **later** is not lost: Telegram keeps unread messages for about a day,
+the bridge queues them and hands them over on the next turn or the next
+session start. `/queue` shows what is waiting.
 
-## Итог хода · `log_when_present.stop`
+Without `spawn` (below), a task can only reach a session that exists — it
+waits in the queue until you open the project.
 
-Строка `✅ Проект · 1м 47с` в конце хода. Если живых блоков по какой-то причине
-не ушло (например, демон подняли посреди хода), сюда приходит **полный текст** —
-содержимое не теряется никогда.
+## Headless agent · `spawn`
 
-## Открытие и закрытие сессий · `log_when_present.session`
+**Off by default.** When a task lands in a project's topic and no session is
+listening, the bridge starts one: `claude -p "<your task>"` in the project's
+directory.
 
-`🟢 сессия открыта` и `⚪ сессия закрыта`. При закрытии добавляется **git-сводка**
-(`git_summary`): ветка и что осталось незакоммиченным. В не-git проектах молчит.
+The spawned agent is an ordinary Claude Code session, so the hooks report it
+back through the very same bridge — live text, the closing summary, the git
+note. Nothing about it is special-cased.
 
-## Падения инструментов · `report_tool_failures`
-
-`❌ Проект · Bash` с командой и текстом ошибки. **По умолчанию выключено** —
-в активной работе это шумно. В сводке за день падения считаются в любом случае.
-
----
-
-## Остаток лимитов · `usage_report`
-
-После каждого хода — отдельным сообщением в тему **«Лимиты Claude»**:
-заполненность 5-часового и недельного окна и **время обнуления**.
-
-```
-📊 Лимиты
-`████░░░░░░` 43% — 5-часовое окно
-   обнуление в 17:34 (через 2ч 15м)
-`████████░░` 78% — Недельное
-   обнуление 01.08 в 15:20
+```json
+"spawn": {
+  "enabled": false,
+  "permission_mode": "acceptEdits",
+  "model": null,
+  "timeout_seconds": 7200
+}
 ```
 
-Данные берутся из статус-строки Claude Code (поле `rate_limits`) — никаких
-браузерных сессий и учётных данных. Те же цифры видны и внизу окна VSCode.
+- `permission_mode` — one of the CLI's own: `acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`. Anything else means the
+  flag is not passed at all and Claude Code uses its default.
+- `model` — `null` keeps whatever the CLI is configured to use.
+- `timeout_seconds` — a backstop against an orphan. Away mode lets the agent's
+  own Stop hook hold it for `wait_seconds` on top of the actual work, so keep
+  this generous. `0` means no limit.
 
-Если версия Claude Code этого поля не отдаёт, сообщение просто не приходит.
-Проценты не выдумываются.
+**Boundaries, on purpose:**
 
-## Статус сервисов Anthropic · `status_monitor`
+- One agent per project. A second task while one is running goes to the queue.
+- Never next to a live session — that session gets the task through its own
+  Stop hook instead, so two agents never edit the same tree at once.
+- Only for projects picked from the list. An auto-discovered project is keyed
+  by its transcript folder, which is not a tree anything can be built in;
+  those tasks are queued.
+- If `claude` is not on `PATH`, the topic says so instead of failing quietly.
 
-Раз в 5 минут опрашивает `status.claude.com` и пишет в тему **«Статус Claude»**,
-когда что-то меняется: общий индикатор, состояние компонента (`Claude API`,
-`Claude Code`, …), новый инцидент с текстом или его закрытие. Сбои приходят
-**со звуком даже когда ты за ПК** — смысл в том, чтобы не мониторить сайт
-руками.
-
-Первый опрос молчит: он только запоминает исходное состояние. Проверить
-вручную — `/claude_status`.
-
-## Обрыв хода по ошибке API
-
-Если ход упал из-за ошибки API или лимита, приходит `🛑 сбой API` с текстом.
-Обычно узнаёшь раньше, чем это признает статус-страница.
-
-## Сторож зависшего хода · `watchdog`
-
-Если ход идёт дольше 20 минут без завершения — одно уведомление `🐌`. Повторно
-по тому же ходу не приходит. Полезно в режиме «не за ПК»: иначе не отличить
-работу от зависания.
-
-## Сводка за день · `daily_digest`
-
-В 21:00 таблица по проектам: ходов, ошибок, суммарное время.
+**This is remote code execution on your machine, triggered by a chat
+message.** A leaked bot token becomes the right to run an agent in your
+projects. Turn it on deliberately.
 
 ---
 
-## Проекты
+## Live text stream · `live_messages`
 
-Кнопка **«Проекты…»** или команда `/projects`: список проектов, которые Claude
-Code уже знает, свежие сверху. Отмеченные получают свою тему в Telegram.
+Text arrives **as it is written**, not in one dump at the end of the turn.
+Live blocks are marked `💬`; the turn closes with a short `✅ Project · 1m 47s`.
 
-Список — это граница приватности: **не отмеченный проект не отправляет ничего**.
+The stream always runs, including while you are at the PC — just silently.
 
-- **Подкаталоги** попадают в тему своего проекта автоматически.
-- **Соседние рабочие каталоги** (тестовые данные, клиент игры) привязываются
-  к проекту: `python install.py --add-path "C:/путь" --for ИмяПроекта`.
-- **`auto_discover`** подключает любой новый проект сам. Удобно, но тогда в
-  Telegram пойдёт содержимое всех сессий на машине, включая случайные.
-- **`exclude_paths`** — никогда не подключать, даже при `auto_discover`.
+Formatting survives: bold, inline code, fenced code blocks with highlighting.
+Long answers are cut on paragraph and code-block boundaries, never mid-line.
+Markdown tables become monospace with aligned columns — Telegram has no tables
+of its own.
+
+## Todo list · `log_when_present.todo`
+
+The todo list arrives as **one message that is edited in place**: `✅` done
+(struck through), `🔸` in progress, `▫️` queued, plus a `2/7` counter. No new
+message per update.
+
+## Turn summary · `log_when_present.stop`
+
+The `✅ Project · 1m 47s` line at the end of a turn. If no live blocks went out
+for any reason (the daemon was started mid-turn, say), the **full text** comes
+here instead — content is never lost.
+
+## Session open and close · `log_when_present.session`
+
+`🟢 session opened` and `⚪ session closed`. Closing adds a **git summary**
+(`git_summary`): the branch and what is left uncommitted. Silent in non-git
+projects.
+
+## Tool failures · `report_tool_failures`
+
+`❌ Project · Bash` with the command and the error text. **Off by default** —
+it is noisy during active work. Failures are counted for the digest either way.
 
 ---
 
-## Команды бота
+## Rate limits · `usage_report`
 
-| Команда | Что делает |
+After each turn, as its own message in the **«Claude limits»** topic: how full
+the 5-hour and weekly windows are, and **when they reset**.
+
+```
+📊 Limits
+`████░░░░░░` 43% — 5-hour window
+   resets at 17:34 (in 2h 15m)
+`████████░░` 78% — Weekly
+   resets 01.08 at 15:20
+```
+
+The data comes from Claude Code's status line (the `rate_limits` field) — no
+browser sessions, no credentials. The same numbers show at the bottom of the
+VSCode window.
+
+If your Claude Code build does not report that field, the message simply does
+not arrive. Percentages are never invented.
+
+### When the status line never runs · `usage_poll`
+
+**Off by default.** Claude Code renders the status line only in its terminal
+UI. Work through the VSCode extension and the cache is never written at all —
+the meters stay on `—` forever, and no amount of polling the file helps.
+
+Turning `usage_poll` on lets the daemon ask the same endpoint the CLI itself
+uses (`/api/oauth/usage`), with the CLI's own OAuth token read from
+`~/.claude/.credentials.json`:
+
+```json
+"usage_poll": {
+  "enabled": false,
+  "interval_seconds": 30,
+  "stale_after_seconds": 45,
+  "timeout_seconds": 10
+}
+```
+
+The status line stays the primary source: if the cache was written less than
+`stale_after_seconds` ago, the poll spends nothing. It only fills silence.
+
+This is the one part of the bridge that touches a credential, which is why it
+is opt-in. The token never leaves your machine except to Anthropic, the same
+place the CLI sends it. The endpoint is undocumented — if it changes, the poll
+starts failing and the daemon logs it twice before backing off; the status
+line path keeps working regardless.
+
+It also surfaces the **Fable pool**, which the status line has never been seen
+to report: the answer carries a per-model weekly window, and the widget gives
+it a row of its own. Fable draws on the shared 5-hour window and only has a
+weekly limit of its own, so there is nothing else to show.
+
+## Anthropic service status · `status_monitor`
+
+Polls `status.claude.com` every 5 minutes and writes into the **«Claude
+status»** topic whenever something changes: the overall indicator, a
+component's state (`Claude API`, `Claude Code`, …), a new incident with its
+text, or its resolution. Outages arrive **with sound even while you are at the
+PC** — the whole point is not having to watch the page yourself.
+
+The first poll is silent: it only records the starting state. `/claude_status`
+checks on demand.
+
+## A turn killed by an API error
+
+If a turn dies on an API error or a limit, `🛑 API failure` arrives with the
+text. You usually learn about it before the status page admits it.
+
+## Stalled-turn watchdog · `watchdog`
+
+If a turn runs longer than 20 minutes without finishing, one `🐌` notice
+arrives. It does not repeat for the same turn. Useful in away mode: otherwise
+work and a hang look identical.
+
+## Daily digest · `daily_digest`
+
+At 21:00, a table by project: turns, errors, total time. The tallies are kept
+for `stats_retention_days` (14 by default) and older days are dropped, so
+`state.json` stays bounded.
+
+---
+
+## The Telegram screen
+
+Widget menu → **Telegram…**, and it opens by itself until the bridge is set
+up. It holds the whole installation in one place:
+
+- the bot token, checked against Telegram **before** it is saved — you see
+  `Bot @yourbot is connected` or the reason it was refused, instead of a
+  daemon that quietly fails to start;
+- whether a group is bound and how many topics exist;
+- whether the Claude Code hooks are installed, with a button that installs
+  them — the one step that used to need a terminal;
+- the five setup steps, and a link that opens @BotFather.
+
+Pasting a different token resets the binding on purpose: another bot means
+another chat, and the old topic ids point at threads it cannot see.
+
+## Projects
+
+The **«Projects…»** button or the `/projects` command: the projects Claude Code
+already knows, freshest first. The checked ones get their own Telegram topic.
+
+That list is the privacy boundary: **an unchecked project sends nothing at
+all**.
+
+- **Subdirectories** land in their project's topic automatically.
+- **Sibling working directories** (test data, a game client) can be bound to a
+  project: `python install.py --add-path "C:/path" --for ProjectName`.
+- **`auto_discover`** bridges any new project by itself. Convenient, but then
+  the contents of every session on the machine go to Telegram, including
+  incidental ones.
+- **`exclude_paths`** — never bridged, even with `auto_discover` on.
+
+---
+
+## Bot commands
+
+| Command | Effect |
 |---|---|
-| `/register` | привязать группу (один раз) |
-| `/away`, `/here` | режим присутствия |
-| `/status` | живые сессии и что ждёт ответа |
-| `/projects` | список проектов, нажатие подключает и отключает |
-| `/queue` | накопленные задачи |
-| `/claude_status` | состояние сервисов Anthropic |
-| `/release` | освободить все висящие ожидания |
+| `/help` | the command list |
+| `/register` | bind this group (once) |
+| `/unregister` | release the binding and forget the topic ids |
+| `/away`, `/here` | presence mode |
+| `/status` | live sessions and what waits for an answer |
+| `/projects` | project list; tapping bridges and unbridges |
+| `/queue` | accumulated tasks |
+| `/claude_status` | Anthropic service status |
+| `/release` | release every pending wait |
+
+Binding is one-way on purpose. A bot's username is discoverable and its token
+is not needed to write to it, so a second `/register` from a stranger's chat
+would redirect everything this bridge reports. Once bound, the bridge ignores
+`/register` from anywhere else; rebinding takes `/unregister` from the chat
+that currently owns it.
 
 ---
 
-## Границы, о которых стоит знать
+## Boundaries worth knowing
 
-- **Ожидание ограничено часом.** Замерено: хук держит сессию полный час, и она
-  штатно доигрывает ход. Больше не проверялось.
-- **Мост говорит на границах хода.** Внутри длинного хода событий нет, кроме
-  живого текста и обновлений todo. Тишина в теме во время долгой работы —
-  это норма.
-- **Ответ на опросник** передаётся через механизм отклонения вызова, поэтому в
-  транскрипте он выглядит как отклонённый инструмент с текстом твоего выбора.
-  На работу это не влияет.
-- **Задачу в несуществующую сессию** поставить нельзя — она ждёт в очереди.
-- **`spawn.enabled`** (по умолчанию `false`) запускает агента по сообщению из
-  Telegram. Это выполнение кода на твоей машине по сообщению в чате; включай,
-  только понимая последствия.
+- **A wait is capped at an hour.** Measured: the hook holds a session for the
+  full hour and it finishes the turn normally afterwards. Beyond that,
+  untested.
+- **The bridge speaks at turn boundaries.** Inside a long turn there are no
+  events other than the live text and todo updates. Silence in a topic during
+  long work is normal.
+- **A question's answer** is delivered through the tool-denial mechanism, so
+  the transcript shows it as a denied tool carrying the text of your choice.
+  It does not affect the work.
+- **A task cannot be pushed into a session that does not exist** unless
+  `spawn` is on — otherwise it waits in the queue.

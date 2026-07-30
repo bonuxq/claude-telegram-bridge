@@ -7,12 +7,20 @@ widget.json
 usage.json
 usage_sample.json
 widget.ico
+widget-tray.ico
 *.log
 tests/test-daemon.log
+tests/test-config.json
+tests/test-state.json
+tests/s.json
 
 # Python
 __pycache__/
 *.pyc
+
+# Build output (PyInstaller + Inno Setup)
+build/
+dist/
 
 # IDE
 .idea/
