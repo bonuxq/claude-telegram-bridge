@@ -26,8 +26,8 @@ bridge is Python standard library.
 - **Rate-limit meters** (5-hour and weekly windows) after each turn and in
   the desktop widget, sourced from the Claude Code status line — no
   credentials, no scraping. The status line only runs in Claude Code's
-  terminal UI, so for VSCode-only setups `usage_poll` (opt-in) lets the daemon
-  fetch the same numbers itself every 30 seconds.
+  terminal UI, so the daemon fetches the same numbers itself every 30 seconds
+  using the Claude Code token — that is what fills the meters on most setups.
 - **A desktop widget**: borderless always-on-top card with a presence toggle,
   three usage meters (session, week, Fable), a tray icon showing the session
   percentage, transparency control, click-through mode and auto-away on

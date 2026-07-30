@@ -29,7 +29,7 @@ ROOT = (os.path.dirname(os.path.abspath(sys.executable))
         if getattr(sys, "frozen", False)
         else os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from claudetg import i18n, usage  # noqa: E402  (needs ROOT on the path)
+from claudetg import i18n, paths, usage  # noqa: E402  (needs ROOT on the path)
 from claudetg.i18n import t  # noqa: E402
 
 CONFIG = os.path.join(ROOT, "config.json")
@@ -194,6 +194,34 @@ def tray_icon(percent, color, path=TRAY_ICON_PATH):
     with open(path, "wb") as f:
         f.write(_ico_bytes(px, size))
     return path
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
+                ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
+
+
+def work_area(x, y):
+    """The usable screen around a point: the monitor it is on, minus the
+    taskbar. Tk only knows the primary display, which puts menus off-screen
+    on a second monitor and under the taskbar on the first."""
+    try:
+        user32 = ctypes.windll.user32
+        point = ctypes.wintypes.POINT(int(x), int(y))
+        monitor = user32.MonitorFromPoint(point, 2)      # NEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.rcWork
+            return r.left, r.top, r.right, r.bottom
+    except (OSError, AttributeError, ValueError):
+        pass
+    return 0, 0, 1920, 1080
 
 
 def round_window(win, radius=14):
@@ -636,9 +664,28 @@ class PopupMenu:
         for item in items:
             self._row(win, item)
         win.geometry(f"+{x}+{y}")
+        self._fit_on_screen(win, x, y)
         # Once the rows have settled: the ring is cut to the menu's real size.
         win.after(10, lambda: round_edge(win, MENU_RADIUS))
         return win
+
+    @staticmethod
+    def _fit_on_screen(win, x, y):
+        """Keep the menu inside the monitor it opened on.
+
+        The tray sits at the bottom of the screen, so a menu drawn downwards
+        from the cursor ran straight off it and the last items were simply
+        unreachable. Pulling it back inside the work area covers that, the
+        right edge, and a second monitor, without special cases.
+        """
+        win.update_idletasks()
+        width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+        left, top, right, bottom = work_area(x, y)
+        if y + height > bottom:
+            y = bottom - height
+        if x + width > right:
+            x = right - width
+        win.geometry(f"+{int(max(x, left))}+{int(max(y, top))}")
 
     def _row(self, win, item):
         kind = item[0]
@@ -1928,5 +1975,27 @@ def session_color(percent, calm=ACCENT):
     return calm
 
 
+def raise_existing():
+    """Bring the copy that is already running to the front.
+
+    A second launch — from the Start menu while autostart already ran, or an
+    installed build next to one started from source — should look like the app
+    responding, not like nothing happening.
+    """
+    user32 = ctypes.windll.user32
+    for title in ("Claude ↔ Telegram", "Claude ↔ Telegram control"):
+        hwnd = user32.FindWindowW(None, title)
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            return True
+    return False
+
+
 if __name__ == "__main__":
+    # Held for the life of the process: releasing it would let a second copy in.
+    _claim = paths.single_instance("ClaudeTelegramWidget")
+    if _claim is None:
+        raise_existing()
+        sys.exit(0)
     Widget().run()

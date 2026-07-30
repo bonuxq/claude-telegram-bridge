@@ -1675,6 +1675,15 @@ class SingleInstanceServer(ThreadingHTTPServer):
 def main():
     cfg = cfgmod.load()
     i18n.set_language(cfg.get("language"))
+    # Two claims, because they catch different mistakes: the mutex stops a
+    # second copy of this build (installed alongside one run from source), the
+    # port stops any daemon at all from stealing the same getUpdates stream.
+    claim = paths.single_instance("ClaudeTelegramDaemon")
+    if claim is None:
+        # Written down, not just exited: started from a shortcut there is no
+        # console to print to, and silence looks identical to a crash.
+        log("another daemon is already running — this one is not needed")
+        raise SystemExit(0)
     try:
         server = SingleInstanceServer((cfg["host"], cfg["port"]), Handler)
     except OSError:

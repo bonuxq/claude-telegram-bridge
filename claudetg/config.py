@@ -69,13 +69,14 @@ DEFAULTS = {
     "live_messages": True,
     # Rate-limit report after each turn; data comes from statusline.py.
     "usage_report": {"enabled": True, "max_age_seconds": 3600},
-    # Fallback source for those limits. Claude Code renders the status line
-    # only in its terminal UI, so a VSCode-only setup never writes the cache
-    # and the meters stay empty. Enabling this lets the daemon ask the same
-    # endpoint the CLI uses, with the CLI's own OAuth token from
-    # ~/.claude/.credentials.json — off by default because nothing else in
-    # the bridge touches a credential.
-    "usage_poll": {"enabled": False, "interval_seconds": 30,
+    # Where those limits actually come from for most installs. Claude Code
+    # renders the status line only in its terminal UI, so a VSCode-only setup
+    # never writes the cache and the meters would sit empty forever — which is
+    # exactly what a fresh install looked like. So this is on: the daemon asks
+    # the same endpoint the CLI uses, with the CLI's own OAuth token from
+    # ~/.claude/.credentials.json. It reads a credential, but sends it nowhere
+    # except Anthropic, and only ever asks for your own usage.
+    "usage_poll": {"enabled": True, "interval_seconds": 30,
                    "stale_after_seconds": 45, "timeout_seconds": 10},
     # Self-update from GitHub Releases. Frozen builds only — from source the
     # update is `git pull`. Installs itself the first moment no session is

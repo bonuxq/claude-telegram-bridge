@@ -37,3 +37,28 @@ def in_resources(*parts):
 
 def frozen():
     return bool(getattr(sys, "frozen", False))
+
+
+def single_instance(name):
+    """Claim a per-user name, or report that someone else already holds it.
+
+    Returns the handle on success and None when another copy is running. The
+    handle must stay referenced for as long as the process lives — dropping it
+    releases the claim.
+
+    A named mutex rather than a lock file: Windows drops it when the process
+    dies, however it dies, so a crash cannot leave a stale claim that keeps
+    the app from ever starting again. "Local\\" scopes it to the session, so
+    two users on one machine are not blocked by each other.
+    """
+    if os.name != "nt":
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, "Local\\" + name)
+    if not handle:
+        return True                     # cannot tell: let the app start
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return None
+    return handle

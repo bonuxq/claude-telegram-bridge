@@ -141,10 +141,9 @@ picks them up on the fly, but not always. Restart the window.
 from a session. Inside a long turn there are no events — the bridge speaks at
 turn boundaries.
 
-**The limits stay empty.** Claude Code only renders the status line in its
-terminal UI, so a VSCode-only setup never feeds it. Turn on **Poll the limits
-myself** in Features — the daemon then asks for them directly every 30
-seconds. See [FEATURES.md](FEATURES.md#when-the-status-line-never-runs--usage_poll).
+**The limits stay empty.** The daemon polls them every 30 seconds using the
+Claude Code token; check that **Poll the limits myself** is still on in
+Features, and that you have signed in to Claude Code on this machine. See [FEATURES.md](FEATURES.md#when-the-status-line-never-runs--usage_poll).
 
 **The daemon does not answer.** Look in `daemon.log` next to the executable.
 If port 8787 is busy, the daemon is already running and a second one is not
@@ -166,5 +165,7 @@ can check the sources and build it yourself with the commands above.
 - `spawn` (off by default) starts an agent on a message from Telegram. That
   is code execution on your machine driven by a chat message, so a leaked
   token becomes the right to run an agent in your projects.
-- `usage_poll` (off by default) is the only part that touches a credential:
-  it reads the Claude Code OAuth token to ask Anthropic for your limits.
+- `usage_poll` (on by default) is the only part that touches a credential: it
+  reads the Claude Code OAuth token to ask Anthropic for your own limits, and
+  sends it nowhere else. Turn it off in Features if you would rather it did
+  not.

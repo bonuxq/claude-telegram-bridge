@@ -146,17 +146,16 @@ not arrive. Percentages are never invented.
 
 ### When the status line never runs · `usage_poll`
 
-**Off by default.** Claude Code renders the status line only in its terminal
-UI. Work through the VSCode extension and the cache is never written at all —
+**On by default**, because for most installs it is the only source there is.
+Claude Code renders the status line only in its terminal UI. Work through the VSCode extension and the cache is never written at all —
 the meters stay on `—` forever, and no amount of polling the file helps.
 
-Turning `usage_poll` on lets the daemon ask the same endpoint the CLI itself
-uses (`/api/oauth/usage`), with the CLI's own OAuth token read from
+It lets the daemon ask the same endpoint the CLI itself uses (`/api/oauth/usage`), with the CLI's own OAuth token read from
 `~/.claude/.credentials.json`:
 
 ```json
 "usage_poll": {
-  "enabled": false,
+  "enabled": true,
   "interval_seconds": 30,
   "stale_after_seconds": 45,
   "timeout_seconds": 10
@@ -166,9 +165,10 @@ uses (`/api/oauth/usage`), with the CLI's own OAuth token read from
 The status line stays the primary source: if the cache was written less than
 `stale_after_seconds` ago, the poll spends nothing. It only fills silence.
 
-This is the one part of the bridge that touches a credential, which is why it
-is opt-in. The token never leaves your machine except to Anthropic, the same
-place the CLI sends it. The endpoint is undocumented — if it changes, the poll
+This is the one part of the bridge that touches a credential, so it is worth
+saying plainly: the token never leaves your machine except to Anthropic, the
+same place the CLI sends it, and it only ever asks for your own usage. Turn it
+off in Features if you would rather it did not. The endpoint is undocumented — if it changes, the poll
 starts failing and the daemon logs it twice before backing off; the status
 line path keeps working regardless.
 
