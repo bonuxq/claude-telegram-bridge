@@ -16,7 +16,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
-from . import discover, hooks, i18n, paths, render, status, transcript, usage
+from . import discover, hooks, i18n, paths, render, status, transcript
+from . import updater, usage, version
 from .i18n import t
 from .tgapi import Bot, TelegramError
 
@@ -451,6 +452,77 @@ class Daemon:
             else:
                 failures = 0
             time.sleep(delay)
+
+    # -- self-update -----------------------------------------------------
+
+    def idle_enough_to_update(self):
+        """No session is running, waiting on you, or being spawned.
+
+        An update closes the daemon, and a hook blocked on a question would go
+        down with it — the session would lose the answer you were about to
+        give. Idle is the only safe moment.
+        """
+        with self.lock:
+            live = any(s.get("alive") for s in self.sessions.values())
+            return not live and not self.waiters and not self.spawning
+
+    def update_forever(self):
+        """Check for a release, and install it the first time it is safe to."""
+        pending = None
+        while True:
+            cfg = self.cfg.get("updates") or {}
+            hours = max(1, int(cfg.get("interval_hours", 6)))
+            if not cfg.get("enabled", True) or not paths.frozen():
+                # From source the update is `git pull`; nothing to do here.
+                time.sleep(hours * 3600)
+                continue
+            try:
+                if pending is None:
+                    pending = updater.available()
+                    if pending:
+                        log(f"update available: {pending['version']} "
+                            f"(installed {version.__version__})")
+                        self.announce_update(pending)
+                if pending and self.idle_enough_to_update():
+                    self.apply_update(pending)
+                    pending = None      # the installer takes it from here
+            except updater.UpdateError as e:
+                log("update check failed:", e)
+            except Exception as e:
+                log("update error:", type(e).__name__, e)
+            # Re-check the pending one every few minutes so it lands as soon
+            # as the bridge falls quiet, instead of waiting a whole interval.
+            time.sleep(300 if pending else hours * 3600)
+
+    def apply_update(self, release):
+        skipped = self.state.get("update_failed")
+        if skipped == release["version"]:
+            return          # already tried this one and it did not verify
+        try:
+            path = updater.download(release)
+        except updater.UpdateError as e:
+            log("update download refused:", e)
+            with self.lock:
+                self.state["update_failed"] = release["version"]
+            self.persist()
+            return
+        log(f"installing {release['version']} from {path}")
+        self.notify_update(t("update.installing", version=release["version"]))
+        updater.launch(path)
+
+    def announce_update(self, release):
+        self.notify_update(t("update.found", version=release["version"]))
+
+    def notify_update(self, text):
+        """Updates are worth a line in the status topic, not a per-project one."""
+        try:
+            self.send(self.STATUS_KEY, t("topic.status"), text, silent=True)
+        except Exception as e:
+            log("update notice failed:", type(e).__name__, e)
+
+    def update_state(self):
+        return {"version": version.__version__, "frozen": paths.frozen(),
+                "enabled": bool((self.cfg.get("updates") or {}).get("enabled", True))}
 
     # -- status page ----------------------------------------------------
 
@@ -1259,6 +1331,7 @@ class Daemon:
         "log_when_present.usage",
         "log_when_present.notification",
         "auto_discover",
+        "updates.enabled",
         "spawn.enabled",
         "debug_hooks",
     ]
@@ -1583,6 +1656,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(self.daemon_ref.telegram_state())
         if self.path.startswith("/hooks"):
             return self._reply(self.daemon_ref.hooks_state())
+        if self.path.startswith("/version"):
+            return self._reply(self.daemon_ref.update_state())
         self._reply({"ok": True})
 
     def log_message(self, *_):
@@ -1640,7 +1715,8 @@ def main():
                      args=((cfg.get("daily_digest") or {}).get("hour", 21),),
                      daemon=True).start()
     threading.Thread(target=daemon.usage_poll_forever, daemon=True).start()
-    log("background workers started (status, watchdog, digest, usage)")
+    threading.Thread(target=daemon.update_forever, daemon=True).start()
+    log("background workers started (status, watchdog, digest, usage, updates)")
 
     log(f"listening on http://{cfg['host']}:{cfg['port']}")
     server.serve_forever()

@@ -1232,6 +1232,97 @@ def test_report_without_a_scoped_pool_is_unchanged():
     print("PASS a report with no scoped pool stays a plain two-window report")
 
 
+def test_version_comparison_never_downgrades():
+    from claudetg import version
+    assert version.is_newer("1.0.1", "1.0.0")
+    assert version.is_newer("v1.2.0", "1.1.9"), "a leading v is common in tags"
+    assert version.is_newer("1.10.0", "1.9.0"), "compared as numbers, not text"
+    assert not version.is_newer("1.0.0", "1.0.0")
+    assert not version.is_newer("0.9.9", "1.0.0")
+    # A tag nobody can parse must never look newer than what is installed.
+    assert not version.is_newer("nightly", "1.0.0")
+    assert not version.is_newer("", "1.0.0")
+    print("PASS version comparison orders releases and rejects junk tags")
+
+
+def test_update_refuses_what_it_cannot_verify():
+    """An unverified download is reported, never installed: without a code
+    signature the checksum is the only thing standing behind that binary."""
+    from claudetg import updater
+    release = {"version": "1.1.0", "name": "Setup.exe", "sha256": "",
+               "url": "https://github.com/x/y/releases/download/1.1.0/Setup.exe"}
+    try:
+        updater.download(release, into=os.path.dirname(os.path.abspath(__file__)))
+        raise AssertionError("installed a file with no checksum")
+    except updater.UpdateError as e:
+        assert "SHA-256" in str(e), e
+    print("PASS an update with no published checksum is refused")
+
+
+def test_update_refuses_a_foreign_download_host():
+    from claudetg import updater
+    release = {"version": "1.1.0", "name": "Setup.exe", "sha256": "a" * 64,
+               "url": "https://evil.example.com/Setup.exe"}
+    try:
+        updater.download(release)
+        raise AssertionError("downloaded from an arbitrary host")
+    except updater.UpdateError as e:
+        assert "refusing" in str(e), e
+    print("PASS an update hosted anywhere but GitHub is refused")
+
+
+def test_checksum_is_read_from_the_release_notes():
+    from claudetg import updater
+    digest = "b" * 64
+    both = updater.checksum_for("ClaudeTelegram-Setup-1.1.0.exe",
+                                "%s  ClaudeTelegram-Setup-1.1.0.exe" % digest)
+    assert both == digest, both
+    labelled = updater.checksum_for("other.exe", "SHA256: %s" % digest.upper())
+    assert labelled == digest, "the label form must be accepted, case-folded"
+    assert updater.checksum_for("x.exe", "no checksum here") == ""
+    print("PASS the checksum is picked out of the release notes")
+
+
+def test_update_waits_for_the_bridge_to_fall_quiet():
+    """Updating restarts the daemon, and a hook blocked on a question would go
+    down with it — taking the answer the user was about to give."""
+    d = make_daemon("s.json", away=True)
+    assert d.idle_enough_to_update() is True
+
+    d.sessions["s1"] = {"project": "p", "alive": True}
+    assert d.idle_enough_to_update() is False, "a live session must hold it off"
+
+    d.sessions.clear()
+    waiter = daemon_module.Waiter("ask", "s1", "p")
+    d.waiters[waiter.id] = waiter
+    assert d.idle_enough_to_update() is False, "a blocked hook must hold it off"
+
+    d.waiters.clear()
+    d.spawning.add("p")
+    assert d.idle_enough_to_update() is False, "a running agent must hold it off"
+
+    d.spawning.clear()
+    assert d.idle_enough_to_update() is True
+    print("PASS an update waits for no sessions, no waiters, no agents")
+
+
+def test_a_failed_update_is_not_retried_forever():
+    d = make_daemon("s.json", away=False)
+    release = {"version": "1.1.0", "name": "Setup.exe", "sha256": "",
+               "url": "https://github.com/x/y/releases/download/1.1.0/Setup.exe"}
+    d.apply_update(release)
+    assert d.state.get("update_failed") == "1.1.0", d.state
+    launched = []
+    original = daemon_module.updater.launch
+    daemon_module.updater.launch = lambda p: launched.append(p)
+    try:
+        d.apply_update(release)         # same broken release, second time
+    finally:
+        daemon_module.updater.launch = original
+    assert not launched, "a release that failed verification was retried"
+    print("PASS a release that fails verification is not retried in a loop")
+
+
 def test_the_suite_never_writes_the_real_config():
     """A guard, not a feature test. The daemon persists config on /register,
     /projects and every settings change; if those paths ever point at the

@@ -82,6 +82,16 @@ up the hooks on start.
 
 ---
 
+## Updates
+
+The installed build keeps itself current: it checks GitHub for releases and
+installs them when the bridge is idle, never mid-session. Turn it off in
+Features → **Update automatically** if you would rather do it by hand.
+
+Publishing a release yourself: run `python build.py`, upload the setup file,
+and paste the checksum line it prints into the release notes — the updater
+refuses anything it cannot verify.
+
 ## Choosing projects
 
 No paths to type. Widget menu → **Projects…**, or `/projects` in the chat:
@@ -113,8 +123,7 @@ Building the installer yourself:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller claudetg.spec --noconfirm
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+python build.py
 ```
 
 ---

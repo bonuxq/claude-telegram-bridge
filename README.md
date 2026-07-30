@@ -32,6 +32,9 @@ bridge is Python standard library.
   three usage meters (session, week, Fable), a tray icon showing the session
   percentage, transparency control, click-through mode and auto-away on
   keyboard idle. The card turns red on its own when a window is nearly spent.
+- **Self-updating**: the installed build fetches new releases from GitHub and
+  installs them the first moment no session is running or waiting. It refuses
+  any download whose published SHA-256 it cannot confirm.
 - **Watchdog, daily digest, git summaries, status.claude.com monitor** — all
   optional, all toggleable from the widget.
 - **9 languages** — English, Українська, Русский, 한국어, 中文, Tiếng Việt,

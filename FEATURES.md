@@ -223,6 +223,31 @@ up. It holds the whole installation in one place:
 Pasting a different token resets the binding on purpose: another bot means
 another chat, and the old topic ids point at threads it cannot see.
 
+## Updates · `updates`
+
+**On by default, for installed builds only.** The daemon asks GitHub for the
+latest release every few hours and installs it the first moment the bridge is
+idle — no live session, nothing waiting on an answer, no spawned agent. An
+update restarts the daemon, and a hook blocked on your question would go down
+with it, taking the answer you were about to give.
+
+```json
+"updates": { "enabled": true, "interval_hours": 6 }
+```
+
+The installer upgrades in place: same install, hooks stay wired, `config.json`
+is kept. You get one line in the **«Claude status»** topic when a release is
+found and another when it is installed.
+
+**It refuses to install what it cannot verify.** Every release publishes the
+SHA-256 of its setup file in the release notes; a download whose hash does not
+match, or that carries no published hash at all, is reported and left alone.
+Downloads are only accepted from GitHub's own hosts. Until the builds are
+code-signed, that checksum is the only thing standing behind the binary.
+
+Running from source, this does nothing at all — there the update is
+`git pull`. The widget's Telegram screen says which of the two you are on.
+
 ## Projects
 
 The **«Projects…»** button or the `/projects` command: the projects Claude Code

@@ -1460,8 +1460,21 @@ class Widget:
 
         link = tk.Label(win, text=t("setup.open.botfather"), font=self.small,
                         bg=SURFACE, fg=ACCENT, cursor="hand2", anchor="w", padx=14)
-        link.pack(fill="x", pady=(6, 10))
+        link.pack(fill="x", pady=(6, 4))
         link.bind("<Button-1>", lambda e: webbrowser.open("https://t.me/BotFather"))
+
+        build = self.request("/version") or {}
+        if build.get("version"):
+            # Installed builds keep themselves current; from source they do not,
+            # and saying so beats letting someone wait for an update forever.
+            note = t("setup.version", version=build["version"])
+            if build.get("frozen"):
+                note += " · " + t("setup.updates.on" if build.get("enabled")
+                                  else "setup.updates.off")
+            else:
+                note += " · " + t("setup.updates.source")
+            tk.Label(win, text=note, font=self.small, bg=SURFACE, fg=MUTED,
+                     anchor="w", padx=14).pack(fill="x", pady=(0, 10))
 
         show(state)
         win.geometry("")        # shrink to whatever the steps needed

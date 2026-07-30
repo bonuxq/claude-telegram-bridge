@@ -77,6 +77,10 @@ DEFAULTS = {
     # the bridge touches a credential.
     "usage_poll": {"enabled": False, "interval_seconds": 30,
                    "stale_after_seconds": 45, "timeout_seconds": 10},
+    # Self-update from GitHub Releases. Frozen builds only — from source the
+    # update is `git pull`. Installs itself the first moment no session is
+    # running, waiting or being spawned.
+    "updates": {"enabled": True, "interval_hours": 6},
 }
 
 _lock = threading.Lock()

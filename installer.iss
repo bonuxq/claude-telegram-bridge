@@ -6,7 +6,11 @@
 
 #define AppName "Claude Telegram Bridge"
 #define AppShort "ClaudeTelegram"
-#define AppVersion "1.0.0"
+; build.py passes the real one from claudetg/version.py, so the installer and
+; the updater can never disagree about which release this is.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppPublisher "Bonux"
 #define AppURL "https://github.com/bonuxq/claude-telegram-bridge"
 
