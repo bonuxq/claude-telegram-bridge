@@ -104,28 +104,80 @@ class Daemon:
         """
         return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
 
-    def topic_for(self, project_key, project_name):
-        """Return the forum topic id for a project, creating it on first use."""
+    def slot_for(self, project_key, session_id):
+        """Which numbered thread this session owns.
+
+        One project can have several windows open at once, and pouring them
+        all into one topic makes the transcript unreadable — worse, an answer
+        typed there could only reach whichever session asked last.
+
+        Sessions come and go while topics are permanent, so a session takes
+        the lowest number no live session is using and gives it back when it
+        ends. Two windows get #1 and #2; close the first, open another, and it
+        becomes #1 again. The group never grows a topic per session.
+        """
+        if not session_id:
+            return 1
         with self.lock:
-            existing = self.state["topics"].get(project_key)
+            slots = self.state.setdefault("slots", {}).setdefault(project_key, {})
+            for number, owner in slots.items():
+                if owner == session_id:
+                    return int(number)
+            busy = {int(n) for n, owner in slots.items()
+                    if owner and owner != session_id
+                    and (self.sessions.get(owner) or {}).get("alive")}
+            number = 1
+            while number in busy:
+                number += 1
+            slots[str(number)] = session_id
+        self.persist()
+        return number
+
+    def release_slot(self, project_key, session_id):
+        with self.lock:
+            slots = (self.state.get("slots") or {}).get(project_key) or {}
+            for number, owner in list(slots.items()):
+                if owner == session_id:
+                    slots[number] = None        # kept, so the topic is reused
+        self.persist()
+
+    @staticmethod
+    def topic_key(project_key, slot):
+        """Slot 1 keeps the project's own key, so topics created before slots
+        existed keep working untouched."""
+        return project_key if slot <= 1 else f"{project_key}#{slot}"
+
+    def topic_for(self, project_key, project_name, session_id=None):
+        """Return the forum topic id for a session, creating it on first use."""
+        slot = self.slot_for(project_key, session_id)
+        key = self.topic_key(project_key, slot)
+        with self.lock:
+            existing = self.state["topics"].get(key)
         if existing:
             return existing
+        title = f"{project_name} #{slot}"
         try:
-            topic = self.bot.create_topic(self.cfg["chat_id"], project_name[:128])
+            topic = self.bot.create_topic(self.cfg["chat_id"], title[:128])
             tid = topic["message_thread_id"]
         except TelegramError as e:
             log("createForumTopic failed:", e, "- falling back to General")
             tid = None
         with self.lock:
-            self.state["topics"][project_key] = tid
+            self.state["topics"][key] = tid
         self.persist()
         return tid
 
-    def send(self, project_key, project_name, text, markup=None, silent=None):
-        """Send rendered HTML to a project's topic. Returns message ids."""
+    def send(self, project_key, project_name, text, markup=None, silent=None,
+             session=None, thread=None):
+        """Send rendered HTML to a session's topic. Returns message ids.
+
+        `session` picks the numbered thread; `thread` overrides it outright,
+        for replies that must land where the question was asked.
+        """
         if not self.linked():
             return []       # not set up yet: stay silent instead of timing out
-        thread = self.topic_for(project_key, project_name)
+        if thread is None:
+            thread = self.topic_for(project_key, project_name, session)
         if silent is None:
             silent = not self.away
         ids = []
@@ -256,7 +308,7 @@ class Daemon:
         if not key:
             return
         ids = self.send(key, name, render.render(text, header=f"💬 <b>{html.escape(name)}</b>"),
-                        silent=not self.away)
+                        silent=not self.away, session=session_id)
         if not ids:
             return      # nothing reached the chat: let the closing message carry it
         with self.lock:
@@ -611,6 +663,10 @@ class Daemon:
                 session.update({"project": key, "name": name, "alive": True,
                                 "cwd": data.get("cwd") or session.get("cwd")})
             self.track_transcript(session_id, data.get("transcript_path"))
+            # Claim the number now, not at the first message: a session that
+            # stays silent still occupies a window, and the next one must not
+            # be handed the same thread.
+            self.slot_for(key, session_id)
         handler = {
             "SessionStart": self.on_session_start,
             "SessionEnd": self.on_session_end,
@@ -639,20 +695,26 @@ class Daemon:
             mode = t("mode.away") if self.away else t("mode.atpc")
             self.send(key, name,
                       t("session.opened", name=html.escape(name), mode=mode),
-                      silent=True)
+                      silent=True, session=sid)
         return self.drain_queue(key)
 
     def on_session_end(self, data, key, name):
+        session_id = data.get("session_id")
         with self.lock:
-            self.sessions.pop(data.get("session_id"), None)
-            self.state.get("todo_msgs", {}).pop(data.get("session_id"), None)
+            self.state.get("todo_msgs", {}).pop(session_id, None)
         if self.should_log("session"):
             note = t("session.closed", name=html.escape(name))
             if self.cfg.get("git_summary", True):
                 summary = self.git_summary(data.get("cwd"))
                 if summary:
                     note += f"\n{summary}"
-            self.send(key, name, note, silent=True)
+            self.send(key, name, note, silent=True, session=session_id)
+        # Only now: the closing note still belonged in this session's thread,
+        # and dropping it from self.sessions first would hand the slot away
+        # mid-sentence.
+        with self.lock:
+            self.sessions.pop(session_id, None)
+        self.release_slot(key, session_id)
         return {}
 
     def on_prompt_submit(self, data, key, name):
@@ -674,13 +736,14 @@ class Daemon:
         detail = _describe_failure(data) or t("fail.api.text")
         head = render.header("🛑", t("fail.api.head", name=name))
         self.send(key, name, render.render(f"```\n{detail[:1500]}\n```", header=head),
-                  silent=False)
+                  silent=False, session=data.get("session_id"))
         return {}
 
     def on_notification(self, data, key, name):
         message = data.get("message") or ""
         if message and self.should_log("notification"):
-            self.send(key, name, f"🔔 {html.escape(message)}")
+            self.send(key, name, f"🔔 {html.escape(message)}",
+                      session=data.get("session_id"))
         return {}
 
     ICONS = {"completed": "✅", "in_progress": "🔸", "pending": "▫️"}
@@ -721,7 +784,7 @@ class Daemon:
                 if "not modified" in (e.description or "").lower():
                     return
                 log("todo edit failed, posting fresh:", e)
-        ids = self.send(key, name, text, silent=True)
+        ids = self.send(key, name, text, silent=True, session=session_id)
         if ids:
             with self.lock:
                 self.state.setdefault("todo_msgs", {})[session_id] = ids[-1]
@@ -745,7 +808,8 @@ class Daemon:
             body.append(f"```\n{detail[:1500]}\n```")
         if not body:
             body.append(t("fail.tool.empty"))
-        self.send(key, name, render.render("\n\n".join(body), header=head))
+        self.send(key, name, render.render("\n\n".join(body), header=head),
+                  session=data.get("session_id"))
         return {}
 
     def on_stop(self, data, key, name):
@@ -779,16 +843,17 @@ class Daemon:
         if queued:
             # A task was sent while nobody was listening: run it now.
             self.send(key, name, self.closing(text, render.header("✅", name, seconds),
-                                              streamed))
+                                              streamed), session=sid)
             self.report_usage()
             self.send(key, name, t("queue.next", task=html.escape(queued[0][:300])),
-                      silent=True)
+                      silent=True, session=sid)
             return {"decision": "block", "reason": _join_tasks(queued)}
 
         head = render.header("✅", name, seconds)
         if not self.away:
             if self.should_log("stop"):
-                self.send(key, name, self.closing(text, head, streamed), silent=True)
+                self.send(key, name, self.closing(text, head, streamed),
+                          silent=True, session=sid)
             self.report_usage()
             return {}
 
@@ -799,17 +864,17 @@ class Daemon:
         ]]}
         msgs = self.closing(text, head, streamed)
         msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
-        ids = self.send(key, name, msgs, markup=markup)
+        ids = self.send(key, name, msgs, markup=markup, session=sid)
         self.report_usage()
         self.register(waiter, key, ids)
 
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result:
-            self.send(key, name, t("stop.timeout"), silent=True)
+            self.send(key, name, t("stop.timeout"), silent=True, session=sid)
             return {}
         if result.get("released"):
-            self.send(key, name, t("stop.released"), silent=True)
+            self.send(key, name, t("stop.released"), silent=True, session=sid)
             return {}
         if result.get("action") == "end":
             return {}
@@ -841,13 +906,15 @@ class Daemon:
         ids = []
         for qi, q in enumerate(questions):
             ids += self.send(key, name, self.render_question(q, qi, len(questions), name),
-                             markup=self.question_markup(waiter.id, qi, q))
+                             markup=self.question_markup(waiter.id, qi, q),
+                             session=data.get("session_id"))
         self.register(waiter, key, ids)
 
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result or result.get("released"):
-            self.send(key, name, t("ask.timeout"), silent=True)
+            self.send(key, name, t("ask.timeout"), silent=True,
+                      session=data.get("session_id"))
             return {}
         return {
             "hookSpecificOutput": {
@@ -1550,10 +1617,12 @@ class Daemon:
             log("status send failed:", e)
 
     def project_by_topic(self, thread):
+        """The project a thread belongs to, slot suffix stripped."""
         with self.lock:
             for key, tid in self.state["topics"].items():
                 if tid == thread:
-                    return key
+                    base, sep, slot = key.rpartition("#")
+                    return base if sep and slot.isdigit() else key
         return None
 
     def ack(self, message, text):

@@ -1371,6 +1371,87 @@ def test_a_rate_limited_poll_backs_off_for_as_long_as_asked():
     print("PASS a rate-limited poll waits as long as the server asked")
 
 
+def test_sessions_in_one_project_get_their_own_threads():
+    """Several windows open on one project used to share a topic, so their
+    output interleaved and an answer could only reach whichever asked last."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
+    d.sessions["b"] = {"project": key, "name": "P", "alive": True}
+    d.sessions["c"] = {"project": key, "name": "P", "alive": True}
+
+    assert d.slot_for(key, "a") == 1
+    assert d.slot_for(key, "b") == 2
+    assert d.slot_for(key, "c") == 3
+    assert d.slot_for(key, "a") == 1, "a session must keep its own number"
+    print("PASS three live sessions take three separate numbers")
+
+
+def test_a_closed_session_hands_its_number_back():
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
+    d.sessions["b"] = {"project": key, "name": "P", "alive": True}
+    assert (d.slot_for(key, "a"), d.slot_for(key, "b")) == (1, 2)
+
+    d.sessions.pop("a")
+    d.release_slot(key, "a")
+    assert d.slot_for(key, "c") == 1, "the freed number should be reused"
+    assert d.slot_for(key, "b") == 2, "the surviving session keeps its own"
+    print("PASS a closed session frees its number for the next one")
+
+
+def test_slot_one_keeps_the_original_topic_key():
+    """Topics created before slots existed must keep working: their key is the
+    project itself, and a reinstall must not orphan them."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    assert d.topic_key(key, 1) == key
+    assert d.topic_key(key, 2) == key + "#2"
+
+    d.state["topics"][key] = TOPIC          # as an older version left it
+    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
+    assert d.topic_for(key, "P", "a") == TOPIC, "existing topic must be reused"
+    assert d.bot.sent == [] and not d.bot.callbacks, "no new topic was needed"
+    print("PASS an existing project topic becomes slot 1 untouched")
+
+
+def test_answers_reach_the_session_that_asked():
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = 11             # slot 1
+    d.state["topics"][key + "#2"] = 22      # slot 2
+    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
+    d.sessions["b"] = {"project": key, "name": "P", "alive": True}
+    d.slot_for(key, "a")
+    d.slot_for(key, "b")
+
+    first = daemon_module.Waiter("stop", "a", key)
+    second = daemon_module.Waiter("stop", "b", key)
+    d.waiters[first.id] = first
+    d.waiters[second.id] = second
+    d.by_topic[11] = first.id
+    d.by_topic[22] = second.id
+
+    d.deliver_text("для второй сессии", 22,
+                   {"chat": {"id": -100}, "message_thread_id": 22})
+    assert second.result == {"action": "continue", "text": "для второй сессии"}
+    assert first.result is None, "the answer leaked into the wrong session"
+    print("PASS an answer lands in the session whose thread it was typed in")
+
+
+def test_a_task_in_any_thread_queues_for_the_project():
+    """The queue stays per project: a task typed into #2 is still a task for
+    that project, and should go to whichever session picks it up first."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key + "#2"] = 22
+    d.deliver_text("почини сборку", 22,
+                   {"chat": {"id": -100}, "message_thread_id": 22})
+    assert d.queue.get(key) == ["почини сборку"], d.queue
+    print("PASS a task typed in a numbered thread queues under the project")
+
+
 def test_the_suite_never_writes_the_real_config():
     """A guard, not a feature test. The daemon persists config on /register,
     /projects and every settings change; if those paths ever point at the

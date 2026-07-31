@@ -492,8 +492,21 @@ class Tray(threading.Thread):
                                          ctypes.c_size_t(wparam or 0),
                                          ctypes.c_ssize_t(lparam or 0)) or 0
 
+        # Button presses only, never movement: a nudged desk would otherwise
+        # pull the session out of Telegram while you are still away, and a
+        # callback on every mouse move is a needless tax on the whole system.
+        BUTTONS = (0x0201, 0x0204, 0x0207, 0x020B)   # L, R, M, X button down
+
+        def mouse_proc(code, wparam, lparam):
+            if code >= 0 and wparam in BUTTONS:
+                self.on_key()
+            return user32.CallNextHookEx(None, code,
+                                         ctypes.c_size_t(wparam or 0),
+                                         ctypes.c_ssize_t(lparam or 0)) or 0
+
         self.proc = WNDPROC(wnd_proc)         # keep alive or they are GC'd
         self.kb = HOOKPROC(kb_proc)
+        self.mouse = HOOKPROC(mouse_proc)
 
         class WNDCLASSW(ctypes.Structure):
             _fields_ = [("style", ctypes.c_uint), ("lpfnWndProc", WNDPROC),
@@ -537,7 +550,8 @@ class Tray(threading.Thread):
         # After the icon exists: the shell writes its settings entry when it
         # first sees it, so there is nothing to promote before this point.
         self.promote()
-        self.hook = user32.SetWindowsHookExW(13, self.kb, None, 0)  # WH_KEYBOARD_LL
+        self.hook = user32.SetWindowsHookExW(13, self.kb, None, 0)   # WH_KEYBOARD_LL
+        self.mouse_hook = user32.SetWindowsHookExW(14, self.mouse, None, 0)  # WH_MOUSE_LL
 
         msg = ctypes.create_string_buffer(48)
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -1322,9 +1336,10 @@ class Widget:
         threading.Thread(target=self._toggle_worker, args=(away,), daemon=True).start()
 
     def auto_presence(self, away):
-        """Idle keyboard+mouse = gone: flip to away. Only a KEY PRESS flips
-        back — a nudged mouse or a cat on the desk should not yank a session
-        out of Telegram. Manual switches are never undone automatically.
+        """Idle keyboard+mouse = gone: flip to away. A key press or a mouse
+        CLICK flips back; movement alone does not, so a nudged desk cannot
+        yank a session out of Telegram while you are still away. Manual
+        switches are never undone automatically.
         """
         seconds = self.auto_var.get()
         if not seconds or not self.alive or self.busy:
