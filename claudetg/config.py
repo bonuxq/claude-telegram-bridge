@@ -76,7 +76,7 @@ DEFAULTS = {
     # the same endpoint the CLI uses, with the CLI's own OAuth token from
     # ~/.claude/.credentials.json. It reads a credential, but sends it nowhere
     # except Anthropic, and only ever asks for your own usage.
-    "usage_poll": {"enabled": True, "interval_seconds": 30,
+    "usage_poll": {"enabled": True, "interval_seconds": 60,
                    "stale_after_seconds": 45, "timeout_seconds": 10},
     # Self-update from GitHub Releases. Frozen builds only — from source the
     # update is `git pull`. Installs itself the first moment no session is

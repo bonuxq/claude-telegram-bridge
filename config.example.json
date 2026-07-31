@@ -24,10 +24,10 @@
 
   "usage_report": { "enabled": true, "max_age_seconds": 3600 },
 
-  "_usage_poll_comment": "Claude Code renders the status line only in its terminal UI, so a VSCode-only setup never gets limit data. Turn this on to let the daemon ask /api/oauth/usage itself, using the CLI's own token from ~/.claude/.credentials.json. It is the only part of the bridge that touches a credential.",
-  "usage_poll": { "enabled": false, "interval_seconds": 30, "stale_after_seconds": 45, "timeout_seconds": 10 },
+  "_usage_poll_comment": "Where the limits come from on most setups: Claude Code only renders the status line in its terminal UI, so a VSCode-only install gets nothing from it. The daemon asks /api/oauth/usage itself, with the CLI's own token from ~/.claude/.credentials.json. It is the only part of the bridge that touches a credential; set enabled to false to stop it.",
+  "usage_poll": { "enabled": true, "interval_seconds": 60, "stale_after_seconds": 45, "timeout_seconds": 10 },
 
-  "status_monitor": { "enabled": true, "interval_seconds": 300, "components": [] },
+  "status_monitor": { "enabled": true, "interval_seconds": 600, "components": [] },
   "watchdog": { "enabled": true, "minutes": 20 },
   "daily_digest": { "enabled": true, "hour": 21 },
   "stats_retention_days": 14,

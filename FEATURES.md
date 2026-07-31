@@ -156,7 +156,7 @@ It lets the daemon ask the same endpoint the CLI itself uses (`/api/oauth/usage`
 ```json
 "usage_poll": {
   "enabled": true,
-  "interval_seconds": 30,
+  "interval_seconds": 60,
   "stale_after_seconds": 45,
   "timeout_seconds": 10
 }

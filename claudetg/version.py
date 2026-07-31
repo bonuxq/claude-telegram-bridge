@@ -4,7 +4,7 @@ build.py hands this to PyInstaller and to Inno Setup, and the updater compares
 releases against it, so a bump here is the only edit a release needs.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # Where the updater looks for releases. A fork only has to change this.
 REPO = "bonuxq/claude-telegram-bridge"

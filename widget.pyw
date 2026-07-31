@@ -13,6 +13,7 @@ menu. Tkinter + ctypes only, so the zero-dependency rule still holds.
 """
 
 import ctypes
+import ctypes.wintypes      # a submodule: plain `import ctypes` does not bring it
 import json
 import os
 import subprocess
@@ -442,14 +443,26 @@ class Tray(threading.Thread):
 
     WM_TRAY = 0x8001          # WM_APP + 1
 
-    def __init__(self, on_event, on_key):
+    def __init__(self, on_event, on_key, on_error=None):
         super().__init__(daemon=True)
         self.on_event = on_event
         self.on_key = on_key
+        self.on_error = on_error
         self.hwnd = None
         self.hicon = None
 
     def run(self):
+        # A thread that dies takes the tray icon with it and says nothing;
+        # the icon simply never appears. Report it instead.
+        try:
+            self._run()
+        except Exception:
+            import traceback
+            if self.on_error:
+                self.on_error("tray thread died:\n" + traceback.format_exc())
+            raise
+
+    def _run(self):
         user32 = ctypes.windll.user32
         LRESULT = ctypes.c_ssize_t
         for fn in (user32.DefWindowProcW, user32.CreateWindowExW,
@@ -494,18 +507,92 @@ class Tray(threading.Thread):
         wc = WNDCLASSW()
         wc.lpfnWndProc = self.proc
         wc.lpszClassName = "ClaudeTgTrayWnd"
-        wc.hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
+        # restype first: ctypes defaults to c_int, which truncates a 64-bit
+        # module handle. Running from source the interpreter happened to load
+        # low enough to survive it; a frozen build does not, and passing the
+        # mangled handle on threw before the icon was ever created — the tray
+        # thread died silently and the icon simply never appeared.
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        wc.hInstance = kernel32.GetModuleHandleW(None)
         user32.RegisterClassW(ctypes.byref(wc))
         self.hwnd = user32.CreateWindowExW(0, wc.lpszClassName, None, 0, 0, 0,
-                                           0, 0, None, None, wc.hInstance, None)
-        self.hicon = user32.LoadImageW(None, ensure_icon(), 1, 0, 0, 0x10)
-        ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self._nid()))
+                                           0, 0, None, None,
+                                           ctypes.c_void_p(wc.hInstance), None)
+        try:
+            self.hicon = user32.LoadImageW(None, ensure_icon(), 1, 0, 0, 0x10)
+        except OSError as e:
+            self.hicon, _ = None, self.on_error and self.on_error("icon: %s" % e)
+        if not self.hicon:
+            # Drawing our own failed — an unwritable folder, a corrupt file.
+            # A stock icon still gives the user somewhere to right-click.
+            user32.LoadIconW.restype = ctypes.c_void_p
+            self.hicon = user32.LoadIconW(None, 32512)      # IDI_APPLICATION
+            if self.on_error:
+                self.on_error("tray: using the stock icon, %s was not usable"
+                              % ICON_PATH)
+        if not ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self._nid())):
+            if self.on_error:
+                self.on_error("tray: Shell_NotifyIcon refused to add the icon")
+        # After the icon exists: the shell writes its settings entry when it
+        # first sees it, so there is nothing to promote before this point.
+        self.promote()
         self.hook = user32.SetWindowsHookExW(13, self.kb, None, 0)  # WH_KEYBOARD_LL
 
         msg = ctypes.create_string_buffer(48)
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
+
+    def promote(self):
+        """Ask Windows 11 to show the icon instead of hiding it in the
+        overflow flyout.
+
+        New executables land there by default, which reads as "the app has no
+        tray icon" — the icon exists, it is just behind a chevron nobody
+        opens. Windows records the choice per executable under
+        NotifyIconSettings; this only fills it in when it has never been set,
+        so a deliberate "hide this" is left alone.
+        """
+        try:
+            import winreg
+        except ImportError:
+            return
+        exe = os.path.normcase(sys.executable)
+        try:
+            root = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                  r"Control Panel\NotifyIconSettings", 0,
+                                  winreg.KEY_READ)
+        except OSError:
+            return                      # older Windows: nothing to promote
+        promoted = False
+        with root:
+            for index in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    name = winreg.EnumKey(root, index)
+                    with winreg.OpenKey(root, name, 0,
+                                        winreg.KEY_READ | winreg.KEY_SET_VALUE) as item:
+                        path, _ = winreg.QueryValueEx(item, "ExecutablePath")
+                        if os.path.normcase(str(path)) != exe:
+                            continue
+                        try:
+                            winreg.QueryValueEx(item, "IsPromoted")
+                            continue    # already decided, by us or by the user
+                        except OSError:
+                            pass
+                        winreg.SetValueEx(item, "IsPromoted", 0,
+                                          winreg.REG_DWORD, 1)
+                        promoted = True
+                except OSError:
+                    continue
+        if promoted:
+            # Re-register so the shell re-reads the setting instead of waiting
+            # for the next sign-in.
+            shell32 = ctypes.windll.shell32
+            shell32.Shell_NotifyIconW(2, ctypes.byref(self._nid()))   # DELETE
+            shell32.Shell_NotifyIconW(0, ctypes.byref(self._nid()))   # ADD
+            if self.on_error:
+                self.on_error("tray: icon promoted out of the overflow flyout")
 
     def _nid(self):
         class NOTIFYICONDATAW(ctypes.Structure):
@@ -754,7 +841,7 @@ class PopupMenu:
 
         for w in (row, lab) + ((tail,) if tail is not None else ()):
             w.bind("<Enter>", enter)
-            w.bind("<Leave>", lambda e: paint(False))
+            w.bind("<Leave>", lambda _e=None: paint(False))
             w.bind("<Button-1>", click)
 
     def _close_from(self, win):
@@ -988,7 +1075,7 @@ class Widget:
         self._region = (0, 0)
         self.root.bind("<Configure>", self.round_corners)
         self.tray_event = None
-        self.tray = Tray(self.on_tray, self.on_key)
+        self.tray = Tray(self.on_tray, self.on_key, self.trace)
         self.tray.start()
         self.root.after(150, self.tray_pump)
         # After the window really exists, or there is no hwnd to restyle.

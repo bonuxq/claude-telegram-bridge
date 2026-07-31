@@ -111,6 +111,18 @@ def fetch_live(token=None, timeout=10, url=USAGE_URL):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        error = UsageError(str(e)[:200])
+        if e.code == 429:
+            # Asking again on the usual cadence just earns another refusal.
+            # Honour Retry-After when it is sent, back off hard when it is not:
+            # without a number to go by, guessing short is how you stay banned.
+            asked = e.headers.get("Retry-After") if e.headers else None
+            try:
+                error.retry_after = max(60, int(asked)) if asked else 300
+            except (TypeError, ValueError):
+                error.retry_after = 300
+        raise error from None
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise UsageError(str(e)[:200]) from None
     limits = windows_from(payload)
@@ -122,6 +134,8 @@ def fetch_live(token=None, timeout=10, url=USAGE_URL):
 
 class UsageError(Exception):
     """The poll failed; the caller decides whether that is worth a message."""
+
+    retry_after = 0     # seconds the server asked us to wait, 0 if it did not
 
 
 def store(record, path=None):

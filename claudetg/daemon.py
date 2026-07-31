@@ -443,6 +443,11 @@ class Daemon:
                     failures += 1
                     if failures in (1, 5):  # once when it breaks, once when stuck
                         log("usage poll failed:", e)
+                    if getattr(e, "retry_after", 0):
+                        # The server said how long to stay away; arguing with
+                        # it only earns more refusals.
+                        time.sleep(e.retry_after)
+                        continue
                 except Exception as e:
                     failures += 1
                     log("usage poll error:", type(e).__name__, e)

@@ -1323,6 +1323,54 @@ def test_a_failed_update_is_not_retried_forever():
     print("PASS a release that fails verification is not retried in a loop")
 
 
+def test_a_rate_limited_poll_backs_off_for_as_long_as_asked():
+    """Seen live: polling every 30s earned a stream of 429s. Asking again on
+    the usual cadence just earns another refusal."""
+    import urllib.error
+    from claudetg import usage as usage_mod
+
+    class Refusing:
+        headers = {"Retry-After": "120"}
+        code = 429
+        def read(self): return b""
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("u", 429, "Too Many Requests",
+                                     {"Retry-After": "120"}, None)
+
+    original = usage_mod.urllib.request.urlopen
+    usage_mod.urllib.request.urlopen = boom
+    try:
+        usage_mod.fetch_live(token="x")
+        raise AssertionError("a 429 was swallowed")
+    except usage_mod.UsageError as e:
+        assert e.retry_after == 120, e.retry_after
+    finally:
+        usage_mod.urllib.request.urlopen = original
+
+    def boom_no_header(*a, **k):
+        raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+    usage_mod.urllib.request.urlopen = boom_no_header
+    try:
+        usage_mod.fetch_live(token="x")
+    except usage_mod.UsageError as e:
+        assert e.retry_after >= 300, "no Retry-After means back off hard"
+    finally:
+        usage_mod.urllib.request.urlopen = original
+
+    # any other failure must not silently pause the poll for minutes
+    def other(*a, **k):
+        raise urllib.error.URLError("no network")
+    usage_mod.urllib.request.urlopen = other
+    try:
+        usage_mod.fetch_live(token="x")
+    except usage_mod.UsageError as e:
+        assert e.retry_after == 0, e.retry_after
+    finally:
+        usage_mod.urllib.request.urlopen = original
+    print("PASS a rate-limited poll waits as long as the server asked")
+
+
 def test_the_suite_never_writes_the_real_config():
     """A guard, not a feature test. The daemon persists config on /register,
     /projects and every settings change; if those paths ever point at the
