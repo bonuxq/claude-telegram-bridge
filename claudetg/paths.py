@@ -39,6 +39,28 @@ def frozen():
     return bool(getattr(sys, "frozen", False))
 
 
+DAEMON_EXE = "claudetg-daemon.exe"
+
+
+def daemon_command():
+    """How to start the daemon from wherever we happen to be running.
+
+    `sys.executable` is only the Python interpreter when running from source.
+    In an installed build it is *this* program, so `-m claudetg.daemon` starts
+    another copy of the caller: the widget re-launched the widget (and the
+    single-instance guard quietly killed it, so the daemon never came up), and
+    the hook client re-launched the hook client, which found no daemon and
+    launched another one — a new process every two seconds, seen live.
+
+    Returns None when the daemon executable is missing, so the caller can give
+    up instead of starting something that cannot possibly be a daemon.
+    """
+    if frozen():
+        exe = in_app(DAEMON_EXE)
+        return [exe] if os.path.exists(exe) else None
+    return [sys.executable, "-m", "claudetg.daemon"]
+
+
 def single_instance(name):
     """Claim a per-user name, or report that someone else already holds it.
 

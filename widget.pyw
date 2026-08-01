@@ -1362,10 +1362,13 @@ class Widget:
         self.root.after(0, self.apply, snapshot)
 
     def start_daemon(self):
+        command = paths.daemon_command()
+        if not command:
+            return False
         creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess, "DETACHED_PROCESS", 0)
         try:
-            subprocess.Popen([sys.executable, "-m", "claudetg.daemon"], cwd=ROOT,
+            subprocess.Popen(command, cwd=ROOT,
                              creationflags=creation, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         except OSError:

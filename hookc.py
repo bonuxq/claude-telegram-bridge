@@ -53,6 +53,11 @@ def main():
         bail()
 
     event = data.get("hook_event_name")
+    if not event:
+        # Nothing to deliver, so nothing to start a daemon for. Claude Code
+        # always names the event; anything else is a stray launch, and one of
+        # those used to reach start_daemon and spawn another hook client.
+        bail()
     cwd = data.get("cwd") or ""
     if not in_scope(cfg, cwd, data.get("transcript_path")):
         trace(cfg, event, "SKIP (not a bridged project)", cwd)
@@ -123,13 +128,30 @@ def post(url, payload, timeout):
         return None
 
 
+def daemon_command():
+    """The command that starts the daemon.
+
+    Kept here rather than imported from claudetg.paths: this client runs on
+    every single hook and imports nothing it does not need. Frozen,
+    sys.executable is *this* client, so `-m claudetg.daemon` starts another
+    hook client, which finds no daemon and starts another one, forever.
+    """
+    if getattr(sys, "frozen", False):
+        exe = os.path.join(ROOT, "claudetg-daemon.exe")
+        return [exe] if os.path.exists(exe) else None
+    return [sys.executable, "-m", "claudetg.daemon"]
+
+
 def start_daemon(cfg):
     """Bring the daemon up in the background and wait for it to answer."""
+    command = daemon_command()
+    if not command:
+        return False
     creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
         subprocess, "DETACHED_PROCESS", 0)
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "claudetg.daemon"],
+            command,
             cwd=ROOT, creationflags=creation,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claudetg import config as cfgmod  # noqa: E402
 from claudetg import daemon as daemon_module  # noqa: E402
 from claudetg.daemon import Daemon  # noqa: E402
-from claudetg import i18n, render, usage  # noqa: E402
+from claudetg import i18n, paths, render, usage  # noqa: E402
 
 # The assertions below are written against the Russian bundle; pin it so the
 # suite does not depend on the OS language of whoever runs it.
@@ -1450,6 +1450,115 @@ def test_a_task_in_any_thread_queues_for_the_project():
                    {"chat": {"id": -100}, "message_thread_id": 22})
     assert d.queue.get(key) == ["почини сборку"], d.queue
     print("PASS a task typed in a numbered thread queues under the project")
+
+
+def test_a_second_session_can_be_answered_at_all():
+    """The bug: a session in slot #2 posted its question into thread #2, but
+    the waiter was filed under the project's first topic. Answering where the
+    buttons actually were found no waiter and queued the text instead."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = 72             # slot 1
+    d.state["topics"][key + "#2"] = 446     # slot 2
+    # slot 1 is held by another, still-running session
+    d.sessions["first"] = {"project": key, "name": "P", "alive": True}
+    d.slot_for(key, "first")
+
+    box, thread = run_async(d, evt("Stop", session_id="second"))
+    assert wait_for(lambda: d.by_topic.get(446)), \
+        "the waiter was not reachable from the thread it posted into"
+    assert 72 not in d.by_topic, "it must not answer for the other session"
+
+    d.deliver_text("продолжай тут", 446,
+                   {"chat": {"id": -100}, "message_thread_id": 446})
+    thread.join(5)
+    assert box["result"] == {"decision": "block", "reason": "продолжай тут"}, box
+    assert not d.queue.get(key), "the text should have woken it, not queued"
+    print("PASS a session in the second thread wakes when answered there")
+
+
+def test_a_window_closed_without_goodbye_stops_holding_its_thread():
+    """A window killed without a SessionEnd left a session that looked alive
+    forever: it kept a numbered thread and convinced spawn that somebody was
+    listening, so tasks queued for a session that was never coming back."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    # Both are working windows when the numbers are handed out.
+    d.sessions["ghost"] = {"project": key, "name": "P", "alive": True,
+                           "last_seen": time.time()}
+    d.sessions["real"] = {"project": key, "name": "P", "alive": True,
+                          "last_seen": time.time()}
+    assert d.slot_for(key, "ghost") == 1
+    assert d.slot_for(key, "real") == 2
+
+    # Then one of them is closed without a SessionEnd and simply goes quiet.
+    d.sessions["ghost"]["last_seen"] = time.time() - d.SESSION_TTL - 60
+    assert d.session_alive(d.sessions["real"]) is True
+    assert d.session_alive(d.sessions["ghost"]) is False
+
+    d.forget_stale_sessions()
+    assert "ghost" not in d.sessions, "the stale session was kept"
+    assert "real" in d.sessions, "a live session must survive the sweep"
+    assert d.slot_for(key, "another") == 1, "the ghost's number was not freed"
+
+    # and it no longer blocks a spawn
+    d.sessions.pop("real")
+    assert d.live_session(key) is False
+    print("PASS a session with no events for hours stops holding its thread")
+
+
+def test_a_refused_poll_slows_the_whole_cadence_down():
+    """Seen live: the poll flapped fail/ok every other minute for hours. The
+    server answered `Retry-After: 60` to a poll it refused for running every
+    60 seconds, so obeying it exactly walked straight back into the refusal."""
+    D = Daemon
+    interval = 60
+    floor = 0
+    # Each refusal walks the poll further out instead of repeating the same ask.
+    floor = D.widen_poll(floor, interval, 60)
+    assert floor == 120, floor
+    floor = D.widen_poll(floor, interval, 60)
+    assert floor == 240, floor
+    # A server asking for longer than our own backoff still wins.
+    assert D.widen_poll(120, interval, 600) == 600
+    # And it never runs away: the ceiling holds.
+    assert D.widen_poll(D.USAGE_FLOOR_MAX, interval, 60) == D.USAGE_FLOOR_MAX
+
+    # Once the refusals stop, the poll speeds back up to the configured rate.
+    floor = 240
+    for _ in range(5):
+        floor = D.calm_poll(floor, interval)
+    assert floor == interval, floor
+    print("PASS a refused poll widens the cadence and recovers it")
+
+
+def test_nothing_ever_relaunches_itself_as_the_daemon():
+    """Seen live: a hook client that could not reach the daemon started the
+    daemon with `sys.executable -m claudetg.daemon`. Frozen, sys.executable is
+    the hook client, so it started another hook client, which started another
+    one — a fresh process every two seconds. The widget had the same line and
+    kept re-launching the widget, so the daemon never came up at all."""
+    import hookc
+
+    frozen = getattr(sys, "frozen", False)
+    try:
+        sys.frozen = True
+        for name, command in (("paths", paths.daemon_command()),
+                              ("hookc", hookc.daemon_command())):
+            # Missing executable is a refusal, not a guess.
+            assert command is None or command[0].endswith("claudetg-daemon.exe"), (
+                f"{name} would relaunch {command}")
+            assert command is None or "-m" not in command, name
+    finally:
+        if frozen:
+            sys.frozen = frozen
+        else:
+            del sys.frozen
+
+    # From source there is no daemon executable, so the module is right.
+    assert paths.daemon_command() == [sys.executable, "-m", "claudetg.daemon"]
+    assert hookc.daemon_command() == [sys.executable, "-m", "claudetg.daemon"]
+    print("PASS neither client can relaunch itself as the daemon")
 
 
 def test_the_suite_never_writes_the_real_config():

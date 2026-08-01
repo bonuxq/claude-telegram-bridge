@@ -55,6 +55,12 @@ class Waiter:
         self.event = threading.Event()
         self.result = None
         self.message_ids = []
+        # The thread its question went to. Not the project's first topic: with
+        # several sessions per project the question lands in that session's
+        # own numbered thread, and the answer arrives back through the same
+        # one. Deriving it from the project instead sent replies to slot 1 and
+        # left every other session unreachable.
+        self.thread = None
 
     def resolve(self, result):
         self.result = result
@@ -65,6 +71,28 @@ class Waiter:
 
 
 class Daemon:
+    # How far the usage poll will stretch itself when the server keeps
+    # refusing, and how many clean polls it takes before it speeds back up.
+    USAGE_FLOOR_MAX = 900
+    USAGE_CALM = 5
+
+    @classmethod
+    def widen_poll(cls, floor, interval, asked):
+        """The cadence to fall back to after the server refused a poll.
+
+        Honouring Retry-After alone is not enough: the server answers "wait 60"
+        to a poll it refused *because* it runs every 60 seconds, so obeying it
+        literally reproduces the refusal on the next tick, forever. Doubling
+        the floor walks the poll out to a rate the server tolerates.
+        """
+        return min(cls.USAGE_FLOOR_MAX, max(asked, (floor or interval) * 2))
+
+    @staticmethod
+    def calm_poll(floor, interval):
+        """Halve the penalty after a clean run, never below the configured
+        interval, so a passing rate limit does not slow the poll down all day."""
+        return max(interval, floor // 2)
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.bot = Bot(cfg["bot_token"])
@@ -125,7 +153,7 @@ class Daemon:
                     return int(number)
             busy = {int(n) for n, owner in slots.items()
                     if owner and owner != session_id
-                    and (self.sessions.get(owner) or {}).get("alive")}
+                    and self.session_alive(self.sessions.get(owner))}
             number = 1
             while number in busy:
                 number += 1
@@ -357,6 +385,7 @@ class Daemon:
                 continue
             try:
                 self.check_stalls(limit)
+                self.forget_stale_sessions()
             except Exception as e:
                 log("watchdog error:", type(e).__name__, e)
 
@@ -470,10 +499,12 @@ class Daemon:
         wrote is left alone.
         """
         failures = 0
+        floor = 0       # a refusal raises the whole cadence; success lowers it
+        wins = 0
         while True:
             cfg = self.cfg.get("usage_poll") or {}
             interval = max(10, int(cfg.get("interval_seconds", 30)))
-            delay = interval
+            delay = max(interval, floor)
             # One sleep, at the bottom, on every path: an early `continue`
             # here turns the whole thread into a busy loop.
             if cfg.get("enabled", False):
@@ -489,23 +520,33 @@ class Daemon:
                             if failures:
                                 log("usage poll recovered")
                             failures = 0
+                            wins += 1
+                            if floor and wins >= self.USAGE_CALM:
+                                floor = self.calm_poll(floor, interval)
+                                wins = 0
                         else:
                             failures += 1   # no token yet, or nothing to store
                 except usage.UsageError as e:
                     failures += 1
+                    wins = 0
                     if failures in (1, 5):  # once when it breaks, once when stuck
                         log("usage poll failed:", e)
-                    if getattr(e, "retry_after", 0):
-                        # The server said how long to stay away; arguing with
-                        # it only earns more refusals.
-                        time.sleep(e.retry_after)
+                    asked = getattr(e, "retry_after", 0)
+                    if asked:
+                        # Waiting exactly as long as the server says and then
+                        # asking again at the old rate earns the same refusal
+                        # every other minute. The cadence itself is what the
+                        # server is objecting to, so widen that instead.
+                        floor = self.widen_poll(floor, interval, asked)
+                        delay = max(asked, floor)
+                        time.sleep(delay)
                         continue
                 except Exception as e:
                     failures += 1
                     log("usage poll error:", type(e).__name__, e)
                 # Backing off keeps an expired token or a dead network from
                 # turning into two requests a minute for the rest of the day.
-                delay = min(interval * (2 ** min(failures, 5)), 900)
+                delay = max(floor, min(interval * (2 ** min(failures, 5)), 900))
             else:
                 failures = 0
             time.sleep(delay)
@@ -520,7 +561,7 @@ class Daemon:
         give. Idle is the only safe moment.
         """
         with self.lock:
-            live = any(s.get("alive") for s in self.sessions.values())
+            live = any(self.session_alive(s) for s in self.sessions.values())
             return not live and not self.waiters and not self.spawning
 
     def update_forever(self):
@@ -661,6 +702,7 @@ class Daemon:
             with self.lock:
                 session = self.sessions.setdefault(session_id, {})
                 session.update({"project": key, "name": name, "alive": True,
+                                "last_seen": time.time(),
                                 "cwd": data.get("cwd") or session.get("cwd")})
             self.track_transcript(session_id, data.get("transcript_path"))
             # Claim the number now, not at the first message: a session that
@@ -857,6 +899,7 @@ class Daemon:
             self.report_usage()
             return {}
 
+        thread = self.topic_for(key, name, sid)
         waiter = Waiter("stop", sid, key)
         markup = {"inline_keyboard": [[
             {"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
@@ -864,9 +907,9 @@ class Daemon:
         ]]}
         msgs = self.closing(text, head, streamed)
         msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
-        ids = self.send(key, name, msgs, markup=markup, session=sid)
+        ids = self.send(key, name, msgs, markup=markup, thread=thread)
         self.report_usage()
-        self.register(waiter, key, ids)
+        self.register(waiter, key, ids, thread)
 
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
@@ -901,14 +944,16 @@ class Daemon:
         if not questions:
             return {}
 
-        waiter = Waiter("ask", data.get("session_id"), key,
+        session_id = data.get("session_id")
+        thread = self.topic_for(key, name, session_id)
+        waiter = Waiter("ask", session_id, key,
                         {"questions": questions, "answers": {}})
         ids = []
         for qi, q in enumerate(questions):
             ids += self.send(key, name, self.render_question(q, qi, len(questions), name),
                              markup=self.question_markup(waiter.id, qi, q),
-                             session=data.get("session_id"))
-        self.register(waiter, key, ids)
+                             thread=thread)
+        self.register(waiter, key, ids, thread)
 
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
@@ -951,18 +996,19 @@ class Daemon:
 
     # -- waiter bookkeeping ---------------------------------------------
 
-    def register(self, waiter, key, message_ids):
+    def register(self, waiter, key, message_ids, thread=None):
         waiter.message_ids = message_ids
+        waiter.thread = (thread if thread is not None
+                         else self.state["topics"].get(key))
         with self.lock:
             self.waiters[waiter.id] = waiter
-            self.by_topic[self.state["topics"].get(key)] = waiter.id
+            self.by_topic[waiter.thread] = waiter.id
 
     def unregister(self, waiter):
         with self.lock:
             self.waiters.pop(waiter.id, None)
-            topic = self.state["topics"].get(waiter.project)
-            if self.by_topic.get(topic) == waiter.id:
-                self.by_topic.pop(topic, None)
+            if self.by_topic.get(waiter.thread) == waiter.id:
+                self.by_topic.pop(waiter.thread, None)
 
     # -- headless spawn ---------------------------------------------------
 
@@ -974,10 +1020,38 @@ class Daemon:
     def spawn_cfg(self):
         return self.cfg.get("spawn") or {}
 
+    # A window closed without a SessionEnd leaves a session that looks alive
+    # forever: it holds a numbered thread and convinces spawn that someone is
+    # listening, so tasks queue up for a session that will never come back.
+    SESSION_TTL = 6 * 3600
+
+    def session_alive(self, session):
+        if not (session or {}).get("alive"):
+            return False
+        seen = session.get("last_seen") or session.get("started")
+        # No timestamp is not evidence of death — a session registered a
+        # moment ago has not been stamped yet, and treating that as stale
+        # would hand its thread away while it is still working.
+        return seen is None or time.time() - seen < self.SESSION_TTL
+
     def live_session(self, key):
         with self.lock:
-            return any(s.get("alive") and s.get("project") == key
+            return any(self.session_alive(s) and s.get("project") == key
                        for s in self.sessions.values())
+
+    def forget_stale_sessions(self):
+        """Drop sessions nothing has been heard from, and free their threads."""
+        with self.lock:
+            stale = [(sid, s.get("project")) for sid, s in self.sessions.items()
+                     if not self.session_alive(s)]
+            for sid, _ in stale:
+                self.sessions.pop(sid, None)
+        for sid, project in stale:
+            if project:
+                self.release_slot(project, sid)
+        if stale:
+            log(f"forgot {len(stale)} session(s) with no events for "
+                f"{self.SESSION_TTL // 3600}h")
 
     def spawn_cwd(self, key):
         """The directory a spawned agent should run in, or None.
@@ -1378,7 +1452,8 @@ class Daemon:
 
     def status_text(self):
         with self.lock:
-            live = [s.get("name", "?") for s in self.sessions.values() if s.get("alive")]
+            live = [s.get("name", "?") for s in self.sessions.values()
+                    if self.session_alive(s)]
             pending = len(self.waiters)
         mode = t("mode.status.away") if self.away else t("mode.status.atpc")
         return (f"{mode}\n"
@@ -1562,7 +1637,8 @@ class Daemon:
     def mode_snapshot(self):
         """Compact state for the desktop widget."""
         with self.lock:
-            sessions = [s.get("name", "?") for s in self.sessions.values() if s.get("alive")]
+            sessions = [s.get("name", "?") for s in self.sessions.values()
+                        if self.session_alive(s)]
             waiting = [{"project": w.project, "kind": w.kind}
                        for w in self.waiters.values()]
             queued = sum(len(v) for v in self.queue.values())
