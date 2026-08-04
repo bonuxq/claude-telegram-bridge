@@ -459,6 +459,13 @@ class Daemon:
         failures = 0
         floor = 0       # a refusal raises the whole cadence; success lowers it
         wins = 0
+        # A restart used to wipe the server's cooldown and ask again at once,
+        # which is how a reboot turned a refusal into a longer one. It is kept
+        # in state, so the wait continues where it left off.
+        left = self.usage_hold_left()
+        if left:
+            log(f"usage poll held for {int(left)}s by an earlier refusal")
+            time.sleep(left)
         while True:
             cfg = self.cfg.get("usage_poll") or {}
             interval = max(10, int(cfg.get("interval_seconds", 30)))
@@ -497,6 +504,7 @@ class Daemon:
                         # server is objecting to, so widen that instead.
                         floor = self.widen_poll(floor, interval, asked)
                         delay = max(asked, floor)
+                        self.hold_usage(delay)
                         time.sleep(delay)
                         continue
                 except Exception as e:
@@ -508,6 +516,42 @@ class Daemon:
             else:
                 failures = 0
             time.sleep(delay)
+
+    def hold_usage(self, seconds):
+        """Remember how long the server asked to be left alone."""
+        with self.lock:
+            self.state["usage_hold_until"] = time.time() + max(0, seconds)
+        self.persist()
+
+    def usage_hold_left(self):
+        with self.lock:
+            until = self.state.get("usage_hold_until") or 0
+        return max(0, until - time.time())
+
+    def poll_usage_now(self):
+        """Fetch the limits this second, for the refresh button.
+
+        Honours the server's cooldown rather than spending it: a button that
+        earns a longer ban every time it is pressed is worse than no button.
+        """
+        left = self.usage_hold_left()
+        if left:
+            return {"ok": False, "wait": int(left), "usage": usage.load()}
+        try:
+            record = usage.fetch_live(
+                timeout=int((self.cfg.get("usage_poll") or {})
+                            .get("timeout_seconds", 10)))
+        except usage.UsageError as e:
+            asked = getattr(e, "retry_after", 0)
+            if asked:
+                self.hold_usage(asked)
+            return {"ok": False, "wait": int(asked),
+                    "error": str(e)[:200], "usage": usage.load()}
+        if not record:
+            return {"ok": False, "error": "no limits in the answer",
+                    "usage": usage.load()}
+        usage.store(record)
+        return {"ok": True, "usage": record}
 
     # -- self-update -----------------------------------------------------
 
@@ -1790,6 +1834,8 @@ class Handler(BaseHTTPRequestHandler):
             result = self.daemon_ref.set_token(data.get("token"))
             result.update(self.daemon_ref.telegram_state())
             return self._reply(result)
+        if self.path.startswith("/usage"):
+            return self._reply(self.daemon_ref.poll_usage_now())
         if self.path.startswith("/hooks"):
             return self._reply(
                 self.daemon_ref.install_hooks(bool(data.get("enable", True))))

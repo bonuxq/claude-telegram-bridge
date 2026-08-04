@@ -951,7 +951,10 @@ class Widget:
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 8787)
         self.base = f"http://{host}:{port}"
-        self.max_age = (cfg.get("usage_report") or {}).get("max_age_seconds", 3600)
+        # No max_age here on purpose: a reading is worth showing until its own
+        # window turns over, which usage.expire_spent_windows works out per
+        # window. Hiding everything an hour after capture is what left the card
+        # blank for a day when the poll could not get through.
         self.alive = False
         self.busy = False
         self.away_state = False
@@ -1321,7 +1324,7 @@ class Widget:
 
     def _poll_worker(self):
         snapshot = self.request("/mode")
-        limits = usage.load(max_age=self.max_age)
+        limits = usage.expire_spent_windows(usage.load())
         self.root.after(0, self.apply, snapshot)
         self.root.after(0, self.apply_usage, limits)
 
@@ -1601,6 +1604,52 @@ class Widget:
         hooks_button.bind("<Button-1>",
                           lambda e: show_hooks(self.request("/hooks", {"enable": True})))
         show_hooks(self.request("/hooks"))
+
+        # -- limits: the poll can be held off by the server for a long time -
+        usage_row = tk.Frame(win, bg=SURFACE)
+        usage_row.pack(fill="x", padx=14, pady=(2, 8))
+        usage_label = tk.Label(usage_row, font=self.small, bg=SURFACE, fg=MUTED,
+                               anchor="w", justify="left", wraplength=340)
+        usage_label.pack(side="left", fill="x", expand=True)
+        usage_button = tk.Label(usage_row, text=t("setup.usage.refresh"),
+                                font=self.small, bg=RAISED, fg=PRIMARY,
+                                cursor="hand2", padx=12, pady=5)
+        usage_button.pack(side="right")
+        usage_button.bind("<Enter>", lambda e: usage_button.configure(bg=RAISED_HI))
+        usage_button.bind("<Leave>", lambda e: usage_button.configure(bg=RAISED))
+
+        def show_usage(answer):
+            if answer is None:
+                return usage_label.configure(text=t("widget.dead.settings"),
+                                             fg=CRITICAL)
+            data = usage.expire_spent_windows(answer.get("usage"))
+            self.apply_usage(data)      # the card follows the button at once
+            if answer.get("ok"):
+                usage_label.configure(text=usage_summary(data), fg=GOOD)
+            elif answer.get("wait"):
+                # The server sets the pace; pressing again only lengthens it.
+                usage_label.configure(
+                    text=t("setup.usage.wait",
+                           minutes=max(1, int(answer["wait"]) // 60)), fg=WARNING)
+            else:
+                usage_label.configure(text=answer.get("error")
+                                      or t("setup.usage.failed"), fg=CRITICAL)
+
+        def refresh_usage():
+            usage_button.configure(text=t("setup.usage.working"))
+
+            def work():
+                answer = self.request("/usage", {})
+
+                def done():
+                    usage_button.configure(text=t("setup.usage.refresh"))
+                    show_usage(answer)
+                self.root.after(0, done)
+            threading.Thread(target=work, daemon=True).start()
+
+        usage_button.bind("<Button-1>", lambda e: refresh_usage())
+        usage_label.configure(text=usage_summary(
+            usage.expire_spent_windows(usage.load())))
 
         tk.Label(win, text=t("setup.steps.title"), font=self.bold, bg=SURFACE,
                  fg=PRIMARY, anchor="w", padx=14).pack(fill="x")
@@ -2060,6 +2109,25 @@ def blend(color, into, amount):
         round(x + (y - x) * amount) for x, y in zip(a, b))
 
 
+
+
+def usage_summary(data):
+    """One line of whatever the limits currently say, for the settings card."""
+    if not data:
+        return t("setup.usage.none")
+    limits = (data or {}).get("rate_limits") or {}
+    parts = []
+    for key in ("five_hour", "seven_day"):
+        label = f"widget.meter.{key}"
+        used = (limits.get(key) or {}).get("used_percentage")
+        if used is not None:
+            parts.append(f"{t(label)} {used:.0f}%")
+    fable = ((limits.get("fable") or {}).get("seven_day") or {}).get("used_percentage")
+    if fable is not None:
+        parts.append(f"Fable {fable:.0f}%")
+    if not parts:
+        return t("setup.usage.none")
+    return " · ".join(parts) + " · " + usage.when_captured(data)
 
 
 def severity(percent, calm=ACCENT):

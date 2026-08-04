@@ -1607,6 +1607,75 @@ def test_nothing_ever_relaunches_itself_as_the_daemon():
     print("PASS neither client can relaunch itself as the daemon")
 
 
+def test_a_window_that_already_reset_is_not_shown_as_full():
+    """Seen live: the poll could not get through for a day, and the cache
+    still said 100% of the week — for a week that had ended the afternoon
+    before. Showing that is worse than showing nothing: the limit was back."""
+    now = time.time()
+    data = {"has_limits": True, "captured_at": now - 26 * 3600, "rate_limits": {
+        "five_hour": {"used_percentage": 0.0, "resets_at": None},
+        "seven_day": {"used_percentage": 100.0, "resets_at": now - 3600},
+        "fable": {"seven_day": {"used_percentage": 33.0, "resets_at": now + 86400}},
+    }}
+    clean = usage.expire_spent_windows(data, now=now)["rate_limits"]
+    assert clean["seven_day"]["used_percentage"] is None, "a reset week was kept"
+    # No reset time at all: the window's own length says when it went stale.
+    assert clean["five_hour"]["used_percentage"] is None, "a day-old 5h reading"
+    assert clean["fable"]["seven_day"]["used_percentage"] == 33.0,         "a window that has not reset must survive"
+
+    fresh = dict(data, captured_at=now - 600)
+    fresh["rate_limits"] = dict(data["rate_limits"],
+                                five_hour={"used_percentage": 12.0, "resets_at": None})
+    kept = usage.expire_spent_windows(fresh, now=now)["rate_limits"]
+    assert kept["five_hour"]["used_percentage"] == 12.0, "a recent reading was dropped"
+    print("PASS a window that already reset is reported as unknown")
+
+
+def test_a_refusal_outlives_the_process():
+    """A reboot used to wipe the server's cooldown and ask again at once,
+    which is how one refusal turned into a longer one."""
+    d = make_daemon("s.json", away=False)
+    assert d.usage_hold_left() == 0
+    d.hold_usage(1633)
+    left = d.usage_hold_left()
+    assert 1600 < left <= 1633, left
+
+    # A fresh daemon reading the same state must still wait.
+    again = make_daemon("s.json", away=False)
+    again.state["usage_hold_until"] = d.state["usage_hold_until"]
+    assert again.usage_hold_left() > 1600
+
+    # And the refresh button spends none of it.
+    asked = []
+    usage_fetch = usage.fetch_live
+    usage.fetch_live = lambda **kw: asked.append(kw) or None
+    try:
+        answer = again.poll_usage_now()
+    finally:
+        usage.fetch_live = usage_fetch
+    assert asked == [], "the button asked anyway and would earn a longer ban"
+    assert answer["ok"] is False and answer["wait"] > 1600, answer
+    print("PASS a rate-limit cooldown survives a restart and the button")
+
+
+def test_the_refresh_button_stores_what_it_reads():
+    d = make_daemon("s.json", away=False)
+    d.state.pop("usage_hold_until", None)
+    record = {"captured_at": time.time(), "has_limits": True, "source": "oauth",
+              "rate_limits": {"five_hour": {"used_percentage": 7.0,
+                                            "resets_at": time.time() + 3600}}}
+    stored, fetch = [], usage.fetch_live
+    usage.fetch_live = lambda **kw: record
+    store = usage.store
+    usage.store = lambda r, path=None: stored.append(r)
+    try:
+        answer = d.poll_usage_now()
+    finally:
+        usage.fetch_live, usage.store = fetch, store
+    assert answer["ok"] is True and stored == [record], answer
+    print("PASS the refresh button stores the reading it got")
+
+
 def test_the_suite_never_writes_the_real_config():
     """A guard, not a feature test. The daemon persists config on /register,
     /projects and every settings change; if those paths ever point at the

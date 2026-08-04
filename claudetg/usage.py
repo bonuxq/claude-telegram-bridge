@@ -23,6 +23,8 @@ CREDENTIALS = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.jso
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 WINDOWS = ("five_hour", "seven_day")
+# How long each window covers, for readings that arrive without a reset time.
+LENGTHS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 
 
 def load(path=CACHE, max_age=None):
@@ -36,6 +38,42 @@ def load(path=CACHE, max_age=None):
         return None
     if max_age and time.time() - data.get("captured_at", 0) > max_age:
         return None
+    return data
+
+
+def expire_spent_windows(data, now=None):
+    """Drop numbers for windows that have already reset since they were read.
+
+    A cached "100% of the week" whose reset time is yesterday is not old news,
+    it is wrong: that week ended and a new one started at zero. Seen live —
+    the poll could not refresh for a day, and the widget would have gone on
+    showing a full weekly bar for a limit that had long since come back.
+
+    What we know is that the number is unknown, so the window is emptied
+    rather than kept or invented.
+    """
+    if not data:
+        return data
+    now = now or time.time()
+    captured = data.get("captured_at") or 0
+
+    def keep(name, window):
+        if not isinstance(window, dict):
+            return window
+        if "used_percentage" in window:
+            # Without a reset time, the window's own length says when the
+            # reading stopped meaning anything: a five-hour number read a day
+            # ago describes a window that has turned over four times since.
+            ends = window.get("resets_at") or (captured + LENGTHS.get(name, 0))
+            if ends and ends < now:
+                return {"used_percentage": None, "resets_at": None}
+            return window
+        return {inner_name: keep(inner_name, inner)
+                for inner_name, inner in window.items()}
+
+    data = dict(data)
+    data["rate_limits"] = {name: keep(name, window)
+                           for name, window in (data.get("rate_limits") or {}).items()}
     return data
 
 
@@ -166,6 +204,19 @@ def status_line_fresh(seconds, path=None):
 def bar(percent, width=10):
     filled = int(round(width * max(0.0, min(100.0, percent)) / 100.0))
     return "█" * filled + "░" * (width - filled)
+
+
+def when_captured(data):
+    """When this reading was taken, so a stale card never looks like a live
+    one. Minutes while it is recent, then the clock time it was read at."""
+    captured = (data or {}).get("captured_at") or 0
+    if not captured:
+        return ""
+    age = max(0, time.time() - captured)
+    if age < 3600:
+        return t("usage.captured.minutes", minutes=int(age // 60))
+    return t("usage.captured.at", when=time.strftime("%d.%m %H:%M",
+                                                     time.localtime(captured)))
 
 
 def when(epoch):
