@@ -82,7 +82,12 @@ DEFAULTS = {
     # the same endpoint the CLI uses, with the CLI's own OAuth token from
     # ~/.claude/.credentials.json. It reads a credential, but sends it nowhere
     # except Anthropic, and only ever asks for your own usage.
-    "usage_poll": {"enabled": True, "interval_seconds": 60,
+    # Three minutes, not one. Measured against the endpoint: it tolerates
+    # roughly one request every two minutes, and a minute-long interval spent
+    # days earning a refusal for every second poll — 517 of them in one day —
+    # until the penalty grew to half an hour. The limits move slowly enough
+    # that nothing is lost by asking less often.
+    "usage_poll": {"enabled": True, "interval_seconds": 180,
                    "stale_after_seconds": 45, "timeout_seconds": 10},
     # Self-update from GitHub Releases. Frozen builds only — from source the
     # update is `git pull`. Installs itself the first moment no session is
@@ -93,6 +98,8 @@ DEFAULTS = {
 # What older versions shipped as the wait, before it was found that a session
 # which stops listening cannot be reached again.
 LEGACY_WAITS = {"wait_seconds": 3300, "hook_timeout_seconds": 3600}
+# The poll interval that earned the refusals, nested one level down.
+LEGACY_POLL = 60
 
 _lock = threading.Lock()
 
@@ -113,6 +120,10 @@ def load(path=None):
         # verbatim. Nobody chose that number, so raise it with the default and
         # leave any value that was actually picked alone.
         cfg[name] = DEFAULTS[name]
+    poll = cfg.get("usage_poll")
+    if isinstance(poll, dict) and poll.get("interval_seconds") == LEGACY_POLL:
+        poll["interval_seconds"] = DEFAULTS["usage_poll"]["interval_seconds"]
+        raised.append("usage_poll")
     if raised and os.path.exists(path):
         # Written back rather than kept in memory: the hook timeout in
         # settings.json is derived from this file by a separate process.

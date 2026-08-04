@@ -1676,6 +1676,41 @@ def test_the_refresh_button_stores_what_it_reads():
     print("PASS the refresh button stores the reading it got")
 
 
+def test_the_pace_a_refusal_taught_is_not_forgotten():
+    """517 refusals in one day, then 244, then a half-hour penalty. The poll
+    did learn to slow down — and threw the lesson away on every restart, of
+    which there can be a dozen in a day."""
+    d = make_daemon("s.json", away=False)
+    d.hold_usage(600, floor=240)
+    assert d.state["usage_floor"] == 240, d.state
+    assert d.state["usage_hold_until"] > time.time()
+
+    # A daemon starting up reads the pace back rather than the fast default.
+    again = make_daemon("s.json", away=False)
+    again.state.update({"usage_floor": d.state["usage_floor"]})
+    assert (again.state.get("usage_floor") or 0) == 240
+
+    # Sustained success walks it back down to the configured interval.
+    floor = 240
+    for _ in range(5):
+        floor = Daemon.calm_poll(floor, 180)
+    again.remember_floor(floor)
+    assert again.state["usage_floor"] == 180, again.state
+
+    # And the configured interval itself is no longer the one that earned them.
+    assert cfgmod.DEFAULTS["usage_poll"]["interval_seconds"] >= 120
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy2.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"bot_token": "x", "usage_poll": {"enabled": True,
+                                                    "interval_seconds": 60}}, f)
+    assert cfgmod.load(path)["usage_poll"]["interval_seconds"] ==         cfgmod.DEFAULTS["usage_poll"]["interval_seconds"], "an old interval stood"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"bot_token": "x", "usage_poll": {"interval_seconds": 45}}, f)
+    assert cfgmod.load(path)["usage_poll"]["interval_seconds"] == 45,         "a chosen interval must stand"
+    os.remove(path)
+    print("PASS the pace a refusal taught survives a restart")
+
+
 def test_the_suite_never_writes_the_real_config():
     """A guard, not a feature test. The daemon persists config on /register,
     /projects and every settings change; if those paths ever point at the

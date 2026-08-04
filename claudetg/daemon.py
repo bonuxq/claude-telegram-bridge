@@ -457,7 +457,11 @@ class Daemon:
         wrote is left alone.
         """
         failures = 0
-        floor = 0       # a refusal raises the whole cadence; success lowers it
+        # The cadence the poll last settled on. Kept in state as well: knowing
+        # "every four minutes, because every two earns a refusal" is the whole
+        # lesson, and starting over at the configured interval after every
+        # restart is how the lesson was unlearned a dozen times a day.
+        floor = self.state.get("usage_floor") or 0
         wins = 0
         # A restart used to wipe the server's cooldown and ask again at once,
         # which is how a reboot turned a refusal into a longer one. It is kept
@@ -488,6 +492,7 @@ class Daemon:
                             wins += 1
                             if floor and wins >= self.USAGE_CALM:
                                 floor = self.calm_poll(floor, interval)
+                                self.remember_floor(floor)
                                 wins = 0
                         else:
                             failures += 1   # no token yet, or nothing to store
@@ -504,7 +509,7 @@ class Daemon:
                         # server is objecting to, so widen that instead.
                         floor = self.widen_poll(floor, interval, asked)
                         delay = max(asked, floor)
-                        self.hold_usage(delay)
+                        self.hold_usage(delay, floor)
                         time.sleep(delay)
                         continue
                 except Exception as e:
@@ -517,10 +522,18 @@ class Daemon:
                 failures = 0
             time.sleep(delay)
 
-    def hold_usage(self, seconds):
-        """Remember how long the server asked to be left alone."""
+    def hold_usage(self, seconds, floor=None):
+        """Remember how long the server asked to be left alone, and at what
+        pace we were asking when it said so."""
         with self.lock:
             self.state["usage_hold_until"] = time.time() + max(0, seconds)
+            if floor:
+                self.state["usage_floor"] = floor
+        self.persist()
+
+    def remember_floor(self, floor):
+        with self.lock:
+            self.state["usage_floor"] = floor or 0
         self.persist()
 
     def usage_hold_left(self):
