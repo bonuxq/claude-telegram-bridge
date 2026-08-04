@@ -961,6 +961,103 @@ def test_spawn_runs_when_no_session_is_listening():
     print("PASS a task with no session starts a headless agent")
 
 
+def test_an_answer_outlives_a_session_that_died_waiting():
+    """Four hours is long enough to close the editor. The reply was typed and
+    acknowledged; if the hook is gone by the time the answer goes back down
+    the socket, it must not vanish with the connection."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": False}
+    d.sessions["s1"] = {"project": key, "name": "P", "alive": True}
+
+    d.rescue_answer({"session_id": "s1", "cwd": PROJECT},
+                    {"decision": "block", "reason": "почини сборку"})
+    assert d.queue.get(key) == ["почини сборку"], d.queue
+    assert d.sessions["s1"].get("parked") is True, "it heard nothing"
+    assert any("почини сборку" in m["text"] for m in d.bot.sent),         "the chat was not told the answer had been kept"
+
+    # With an agent available it is started instead of queued.
+    d2 = make_daemon("s2.json", away=True)
+    d2.state["topics"][key] = TOPIC
+    d2.cfg["spawn"] = {"enabled": True}
+    d2.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+    started = []
+    d2.run_spawn = lambda *a: started.append(a)
+    d2.rescue_answer({"session_id": "gone", "cwd": PROJECT},
+                     {"decision": "block", "reason": "подними сервер"})
+    assert started, "nothing took the rescued answer"
+    assert not d2.queue.get(key)
+    print("PASS an answer survives the session it was meant for")
+
+
+def test_a_session_that_stopped_listening_lets_a_spawn_through():
+    """The trap this was built to close: the wait ran out, so the session no
+    longer hears the chat, but it is still an open window. Counted as live, it
+    kept the task in a queue for a session that was never coming back — the
+    task sat there until somebody happened to type in that window."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["spawn"] = {"enabled": True, "command": "claude-stub"}
+    d.sessions["s1"] = {"project": key, "name": "TGbotClaude", "alive": True}
+    started = []
+    d.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+    d.run_spawn = lambda *a: started.append(a)
+
+    d.park("s1")
+    assert d.live_session(key) is False, "a parked session must not count"
+    d.deliver_text("собери релиз", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert started, "nothing picked the task up"
+    assert not d.queue.get(key), "it should have been taken, not queued"
+
+    # Using that window again puts it back in charge of its own project.
+    d.handle_event(evt("UserPromptSubmit", session_id="s1"))
+    assert d.sessions["s1"].get("parked") is False
+    assert d.live_session(key) is True
+    print("PASS a session that stopped listening no longer blocks a spawn")
+
+
+def test_a_run_out_wait_says_what_happens_next():
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.cfg["wait_seconds"] = 0.1
+    d.cfg["spawn"] = {"enabled": True}
+    d.spawn_cwd = lambda k: "C:/Work/BridgeProject"
+
+    box, thread = run_async(d, evt("Stop", session_id="s1"))
+    thread.join(5)
+    assert d.sessions["s1"].get("parked") is True, "the session was not parked"
+    said = " ".join(m["text"] for m in d.bot.sent)
+    assert i18n.t("stop.parked") in said, said
+    assert i18n.t("stop.timeout") not in said, "the wrong ending was reported"
+
+    # With no agent to start, it promises the queue instead.
+    d.cfg["spawn"] = {"enabled": False}
+    assert d.can_spawn(key) is False
+    print("PASS a wait that runs out says whether a task would start a session")
+
+
+def test_an_old_config_gets_the_longer_wait():
+    """An hour was never chosen by anyone — it was the old default, and it is
+    what made sessions unreachable. Raise it, but never override a real choice."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"bot_token": "x", "wait_seconds": 3300,
+                   "hook_timeout_seconds": 3600}, f)
+    cfg = cfgmod.load(path)
+    assert cfg["wait_seconds"] == cfgmod.DEFAULTS["wait_seconds"]
+    assert cfg["hook_timeout_seconds"] == cfgmod.DEFAULTS["hook_timeout_seconds"]
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"bot_token": "x", "wait_seconds": 600}, f)
+    assert cfgmod.load(path)["wait_seconds"] == 600, "a chosen value must stand"
+    os.remove(path)
+    print("PASS an hour-long wait from an older config is raised")
+
+
 def test_spawn_stands_aside_for_a_live_session():
     """A live session gets the task through its own Stop hook — starting a
     second agent in the same tree would have two of them editing at once."""

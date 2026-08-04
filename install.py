@@ -24,6 +24,7 @@ ROOT = (os.path.dirname(os.path.abspath(sys.executable))
         else os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from claudetg import hooks  # noqa: E402
+from claudetg.config import DEFAULTS  # noqa: E402
 
 CONFIG = os.path.join(ROOT, "config.json")
 WINDOWS = os.name == "nt"
@@ -164,9 +165,10 @@ def main():
     if timeout is None:
         try:
             with open(CONFIG, encoding="utf-8") as f:
-                timeout = json.load(f).get("hook_timeout_seconds", 3600)
+                timeout = json.load(f).get("hook_timeout_seconds",
+                                           DEFAULTS["hook_timeout_seconds"])
         except (OSError, ValueError):
-            timeout = 3600
+            timeout = DEFAULTS["hook_timeout_seconds"]
     install(timeout)
 
 

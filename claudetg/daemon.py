@@ -660,7 +660,7 @@ class Daemon:
             with self.lock:
                 session = self.sessions.setdefault(session_id, {})
                 session.update({"project": key, "name": name, "alive": True,
-                                "last_seen": time.time(),
+                                "last_seen": time.time(), "parked": False,
                                 "cwd": data.get("cwd") or session.get("cwd")})
             self.track_transcript(session_id, data.get("transcript_path"))
         handler = {
@@ -862,7 +862,9 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result:
-            self.send(key, name, t("stop.timeout"), silent=True)
+            self.park(sid)
+            self.send(key, name, t("stop.parked") if self.can_spawn(key)
+                      else t("stop.timeout"), silent=True)
             return {}
         if result.get("released"):
             self.send(key, name, t("stop.released"), silent=True)
@@ -982,9 +984,55 @@ class Daemon:
         return seen is None or time.time() - seen < self.SESSION_TTL
 
     def live_session(self, key):
+        """Is a session of this project in a position to take a task?
+
+        A parked one is not. Its window is still open, but its wait ran out
+        and control went back to the editor, so it hears nothing from the chat
+        until somebody types in that window. Counting it as live is what made
+        a task sit in the queue for a session that was never coming back.
+        """
         with self.lock:
-            return any(self.session_alive(s) and s.get("project") == key
+            return any(self.session_alive(s) and not s.get("parked")
+                       and s.get("project") == key
                        for s in self.sessions.values())
+
+    def park(self, session_id):
+        """The session stopped listening to the chat. Reversed by its next
+        event, which only happens when it is used at the keyboard again."""
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session:
+                session["parked"] = True
+
+    def can_spawn(self, key):
+        """Whether a task typed now would start a session rather than queue."""
+        return bool(self.spawn_cfg().get("enabled")) and bool(self.spawn_cwd(key))
+
+    def rescue_answer(self, data, result):
+        """Put an answer back in play when its session died before hearing it.
+
+        The reply was typed, acknowledged, and then had nowhere to go. Long
+        waits make this reachable: four hours is plenty of time to close the
+        editor. Treat it as a task, exactly as if it had been typed a moment
+        later — a session picks it up, or an agent is started for it.
+        """
+        task = (result or {}).get("reason")
+        if not task:
+            return
+        session_id = data.get("session_id")
+        if session_id:
+            self.park(session_id)   # it answered nothing; it is not listening
+        found = cfgmod.project_for(self.cfg, data.get("cwd") or "")
+        key = found[0] if found else None
+        if not key:
+            return
+        if self.try_spawn(key, task):
+            return
+        with self.lock:
+            self.queue.setdefault(key, []).append(task)
+        self.persist()
+        self.send(key, self.project_name(key),
+                  t("queue.rescued", task=html.escape(task[:300])), silent=False)
 
     def forget_stale_sessions(self):
         """Drop sessions nothing has been heard from in hours."""
@@ -1539,7 +1587,8 @@ class Daemon:
     def install_hooks(self, enable=True):
         """The one step that used to need a terminal."""
         try:
-            timeout = int(self.cfg.get("hook_timeout_seconds", 3600))
+            timeout = int(self.cfg.get("hook_timeout_seconds",
+                                       cfgmod.DEFAULTS["hook_timeout_seconds"]))
             result = (hooks.install(timeout) if enable else hooks.uninstall())
             log("hooks installed" if enable else "hooks removed",
                 f"(backup: {result.get('backup')})" if result.get("backup") else "")
@@ -1749,7 +1798,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log("handle_event error:", type(e).__name__, e)
             result = {}
-        self._reply(result)
+        try:
+            self._reply(result)
+        except OSError as e:
+            # The hook is gone — the editor was closed, or Claude Code killed
+            # it while it waited. Whatever was typed in the chat was accepted
+            # and would now vanish with the connection, so hand it back.
+            log("hook connection lost:", e)
+            self.daemon_ref.rescue_answer(data, result)
 
     def do_GET(self):
         if self.path.startswith("/mode"):

@@ -99,7 +99,7 @@ def status(path=None):
     }
 
 
-def install(timeout=3600, path=None):
+def install(timeout=14400, path=None):
     """Idempotent: strips our previous entries before writing new ones."""
     settings = load_settings(path)
     saved = backup(path)

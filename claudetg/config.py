@@ -19,10 +19,16 @@ DEFAULTS = {
     "language": None,
     "host": "127.0.0.1",
     "port": 8787,
-    # Must stay below the hook `timeout` in settings.json, so the hook returns
-    # an answer of its own accord instead of being killed mid-wait.
-    "wait_seconds": 3300,
-    "hook_timeout_seconds": 3600,
+    # How long a finished turn keeps listening to the chat before it gives up
+    # and hands control back to the editor. Four hours rather than the old
+    # hour: a session that stops listening cannot be woken at all, and coming
+    # back to the keyboard releases every wait instantly anyway, so a long
+    # wait costs nothing while you are actually away.
+    #
+    # wait_seconds must stay below the hook `timeout` in settings.json, so the
+    # hook answers of its own accord instead of being killed mid-wait.
+    "wait_seconds": 14100,
+    "hook_timeout_seconds": 14400,
     # Absolute project paths with custom names / extra_paths. With
     # auto_discover on these are optional overrides, not a whitelist.
     "projects": {},
@@ -84,6 +90,10 @@ DEFAULTS = {
     "updates": {"enabled": True, "interval_hours": 6},
 }
 
+# What older versions shipped as the wait, before it was found that a session
+# which stops listening cannot be reached again.
+LEGACY_WAITS = {"wait_seconds": 3300, "hook_timeout_seconds": 3600}
+
 _lock = threading.Lock()
 
 
@@ -97,6 +107,16 @@ def load(path=None):
         with open(path, encoding="utf-8") as f:
             cfg.update(json.load(f))
     cfg["projects"] = {normalize(k): v for k, v in cfg.get("projects", {}).items()}
+    raised = [name for name, old in LEGACY_WAITS.items() if cfg.get(name) == old]
+    for name in raised:
+        # A config written by an older version carries the old hour-long wait
+        # verbatim. Nobody chose that number, so raise it with the default and
+        # leave any value that was actually picked alone.
+        cfg[name] = DEFAULTS[name]
+    if raised and os.path.exists(path):
+        # Written back rather than kept in memory: the hook timeout in
+        # settings.json is derived from this file by a separate process.
+        save(cfg, path)
     return cfg
 
 

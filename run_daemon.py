@@ -16,7 +16,7 @@ ROOT = (os.path.dirname(os.path.abspath(sys.executable))
         else os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from claudetg import hooks  # noqa: E402
+from claudetg import config, hooks  # noqa: E402
 from claudetg.daemon import main  # noqa: E402
 
 
@@ -24,7 +24,9 @@ def wire(enable):
     """Install or remove the Claude Code hooks, quietly enough for an
     installer: a failure here must not fail the whole installation."""
     try:
-        result = hooks.install(3600) if enable else hooks.uninstall()
+        timeout = int(config.load().get("hook_timeout_seconds",
+                                        config.DEFAULTS["hook_timeout_seconds"]))
+        result = hooks.install(timeout) if enable else hooks.uninstall()
     except OSError as e:
         print(f"hooks: {e}", file=sys.stderr)
         return 0
