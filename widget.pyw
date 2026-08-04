@@ -1127,6 +1127,7 @@ class Widget:
             ("cmd", t("menu.setup"), self.open_setup),
             ("cmd", t("menu.projects"), self.open_projects),
             ("cmd", t("menu.settings"), self.open_settings),
+            ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
             ("sub", t("menu.clickthrough"), through),
             ("sub", t("menu.autoaway"), auto),
@@ -1135,6 +1136,31 @@ class Widget:
             ("cmd", t("menu.tray"), self.hide_to_tray),
             ("cmd", t("menu.close"), self.close),
         ]
+
+    def refresh_usage(self):
+        """Ask for the limits now. The poll runs on its own schedule and the
+        server can hold it off for half an hour, so this is the way to say
+        "look again" without restarting anything."""
+        self.paint(self.theme, t("usage.asking"))
+
+        def work():
+            answer = self.request("/usage", {})
+            self.root.after(0, lambda: self.show_refresh(answer))
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_refresh(self, answer):
+        if answer is None:
+            return self.paint(DEAD, t("widget.dead.settings"))
+        data = usage.expire_spent_windows(answer.get("usage"))
+        self.apply_usage(data)          # the meters follow immediately
+        if answer.get("ok"):
+            self.paint(self.theme, usage_summary(data))
+        elif answer.get("wait"):
+            # The server sets the pace; asking again only lengthens it.
+            self.paint(self.theme, t("setup.usage.wait",
+                                     minutes=max(1, int(answer["wait"]) // 60)))
+        else:
+            self.paint(self.theme, answer.get("error") or t("setup.usage.failed"))
 
     def set_lang(self, code):
         """Persist via the daemon (it owns config.json), then restart the
@@ -1604,52 +1630,6 @@ class Widget:
         hooks_button.bind("<Button-1>",
                           lambda e: show_hooks(self.request("/hooks", {"enable": True})))
         show_hooks(self.request("/hooks"))
-
-        # -- limits: the poll can be held off by the server for a long time -
-        usage_row = tk.Frame(win, bg=SURFACE)
-        usage_row.pack(fill="x", padx=14, pady=(2, 8))
-        usage_label = tk.Label(usage_row, font=self.small, bg=SURFACE, fg=MUTED,
-                               anchor="w", justify="left", wraplength=340)
-        usage_label.pack(side="left", fill="x", expand=True)
-        usage_button = tk.Label(usage_row, text=t("setup.usage.refresh"),
-                                font=self.small, bg=RAISED, fg=PRIMARY,
-                                cursor="hand2", padx=12, pady=5)
-        usage_button.pack(side="right")
-        usage_button.bind("<Enter>", lambda e: usage_button.configure(bg=RAISED_HI))
-        usage_button.bind("<Leave>", lambda e: usage_button.configure(bg=RAISED))
-
-        def show_usage(answer):
-            if answer is None:
-                return usage_label.configure(text=t("widget.dead.settings"),
-                                             fg=CRITICAL)
-            data = usage.expire_spent_windows(answer.get("usage"))
-            self.apply_usage(data)      # the card follows the button at once
-            if answer.get("ok"):
-                usage_label.configure(text=usage_summary(data), fg=GOOD)
-            elif answer.get("wait"):
-                # The server sets the pace; pressing again only lengthens it.
-                usage_label.configure(
-                    text=t("setup.usage.wait",
-                           minutes=max(1, int(answer["wait"]) // 60)), fg=WARNING)
-            else:
-                usage_label.configure(text=answer.get("error")
-                                      or t("setup.usage.failed"), fg=CRITICAL)
-
-        def refresh_usage():
-            usage_button.configure(text=t("setup.usage.working"))
-
-            def work():
-                answer = self.request("/usage", {})
-
-                def done():
-                    usage_button.configure(text=t("setup.usage.refresh"))
-                    show_usage(answer)
-                self.root.after(0, done)
-            threading.Thread(target=work, daemon=True).start()
-
-        usage_button.bind("<Button-1>", lambda e: refresh_usage())
-        usage_label.configure(text=usage_summary(
-            usage.expire_spent_windows(usage.load())))
 
         tk.Label(win, text=t("setup.steps.title"), font=self.bold, bg=SURFACE,
                  fg=PRIMARY, anchor="w", padx=14).pack(fill="x")
