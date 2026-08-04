@@ -13,6 +13,7 @@ Console flags matter as much:
 """
 
 import os
+import sys
 
 from PyInstaller.building.api import COLLECT, EXE, PYZ
 from PyInstaller.building.build_main import Analysis
@@ -46,15 +47,59 @@ status_pyz = PYZ(status_a.pure)
 
 ICON = "widget.ico" if os.path.exists("widget.ico") else None
 
+sys.path.insert(0, os.getcwd())
+from claudetg.version import __version__, parts  # noqa: E402
+
+
+def version_resource(name, description):
+    """Write a VS_VERSIONINFO for one executable and return its path.
+
+    An unsigned PyInstaller build with no version resource at all is what
+    Defender's heuristics look at, and Bearfoos.A!ml duly quarantined the
+    widget — deleting the executable, both shortcuts and the uninstall entry.
+    A signature is the real answer, but a binary that says who it is and what
+    version it is costs nothing and is what every legitimate build carries.
+    """
+    numbers = (parts(__version__) + (0, 0, 0, 0))[:4]
+    path = os.path.join("build", f"version_{name}.txt")
+    os.makedirs("build", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={numbers}, prodvers={numbers},
+                    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0),
+  kids=[
+    StringFileInfo([StringTable("040904B0", [
+      StringStruct("CompanyName", "bonuxq"),
+      StringStruct("FileDescription", "{description}"),
+      StringStruct("FileVersion", "{__version__}"),
+      StringStruct("InternalName", "{name}"),
+      StringStruct("LegalCopyright", "MIT License"),
+      StringStruct("OriginalFilename", "{name}.exe"),
+      StringStruct("ProductName", "Claude Telegram Bridge"),
+      StringStruct("ProductVersion", "{__version__}"),
+    ])]),
+    VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+  ],
+)
+""")
+    return path
+
 widget_exe = EXE(widget_pyz, widget_a.scripts, [], exclude_binaries=True,
-                 name="ClaudeTelegram", console=False, icon=ICON)
+                 name="ClaudeTelegram", console=False, icon=ICON,
+                 version=version_resource("ClaudeTelegram",
+                                          "Claude Telegram Bridge"))
 daemon_exe = EXE(daemon_pyz, daemon_a.scripts, [], exclude_binaries=True,
-                 name="claudetg-daemon", console=False, icon=ICON)
+                 name="claudetg-daemon", console=False, icon=ICON,
+                 version=version_resource("claudetg-daemon",
+                                          "Claude Telegram Bridge daemon"))
 # Console on purpose: Claude Code pipes JSON through these two.
 hookc_exe = EXE(hookc_pyz, hookc_a.scripts, [], exclude_binaries=True,
-                name="hookc", console=True, icon=ICON)
+                name="hookc", console=True, icon=ICON,
+                version=version_resource("hookc", "Claude Code hook client"))
 status_exe = EXE(status_pyz, status_a.scripts, [], exclude_binaries=True,
-                 name="statusline", console=True, icon=ICON)
+                 name="statusline", console=True, icon=ICON,
+                 version=version_resource("statusline",
+                                          "Claude Code status line"))
 
 COLLECT(widget_exe, widget_a.binaries, widget_a.datas,
         daemon_exe, daemon_a.binaries, daemon_a.datas,
