@@ -45,6 +45,7 @@ class FakeBot:
         self.next_id = 1000
 
     def create_topic(self, chat_id, name):
+        self.callbacks.append(("create_topic", chat_id, name))
         return {"message_thread_id": TOPIC}
 
     def send_message(self, chat_id, text, thread_id=None, markup=None,
@@ -1371,73 +1372,76 @@ def test_a_rate_limited_poll_backs_off_for_as_long_as_asked():
     print("PASS a rate-limited poll waits as long as the server asked")
 
 
-def test_sessions_in_one_project_get_their_own_threads():
-    """Several windows open on one project used to share a topic, so their
-    output interleaved and an answer could only reach whichever asked last."""
+def test_every_session_of_a_project_shares_one_topic():
+    """Numbered threads per session were tried and taken back out: a session
+    that finishes its task stops listening, so its own thread became a dead
+    end nobody could talk to, and the group filled up with them."""
     d = make_daemon("s.json", away=False)
     key = cfgmod.normalize(PROJECT)
     d.sessions["a"] = {"project": key, "name": "P", "alive": True}
     d.sessions["b"] = {"project": key, "name": "P", "alive": True}
-    d.sessions["c"] = {"project": key, "name": "P", "alive": True}
+    d.state["topics"][key] = TOPIC          # as any earlier version left it
 
-    assert d.slot_for(key, "a") == 1
-    assert d.slot_for(key, "b") == 2
-    assert d.slot_for(key, "c") == 3
-    assert d.slot_for(key, "a") == 1, "a session must keep its own number"
-    print("PASS three live sessions take three separate numbers")
+    assert d.topic_for(key, "P") == TOPIC
+    assert d.topic_for(key, "P") == TOPIC, "a second window creates nothing"
+    made = [c for c in d.bot.callbacks if c[0] == "create_topic"]
+    assert made == [], "no topic should have been created"
+    assert [k for k in d.state["topics"] if "#" in k] == [], d.state["topics"]
+    print("PASS every window on a project talks in the project's own topic")
 
 
-def test_a_closed_session_hands_its_number_back():
+def test_a_topic_is_created_once_and_kept():
     d = make_daemon("s.json", away=False)
-    key = cfgmod.normalize(PROJECT)
-    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
-    d.sessions["b"] = {"project": key, "name": "P", "alive": True}
-    assert (d.slot_for(key, "a"), d.slot_for(key, "b")) == (1, 2)
-
-    d.sessions.pop("a")
-    d.release_slot(key, "a")
-    assert d.slot_for(key, "c") == 1, "the freed number should be reused"
-    assert d.slot_for(key, "b") == 2, "the surviving session keeps its own"
-    print("PASS a closed session frees its number for the next one")
-
-
-def test_slot_one_keeps_the_original_topic_key():
-    """Topics created before slots existed must keep working: their key is the
-    project itself, and a reinstall must not orphan them."""
-    d = make_daemon("s.json", away=False)
-    key = cfgmod.normalize(PROJECT)
-    assert d.topic_key(key, 1) == key
-    assert d.topic_key(key, 2) == key + "#2"
-
-    d.state["topics"][key] = TOPIC          # as an older version left it
-    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
-    assert d.topic_for(key, "P", "a") == TOPIC, "existing topic must be reused"
-    assert d.bot.sent == [] and not d.bot.callbacks, "no new topic was needed"
-    print("PASS an existing project topic becomes slot 1 untouched")
+    key = "d:/work/fresh"
+    d.state["topics"].pop(key, None)
+    first = d.topic_for(key, "Fresh")
+    second = d.topic_for(key, "Fresh")
+    assert first == second, "the topic must be reused, not recreated"
+    titles = [c for c in d.bot.callbacks if c[0] == "create_topic"]
+    assert len(titles) == 1, titles
+    assert titles[0][2] == "Fresh", "the title carries no number any more"
+    print("PASS a project topic is created once, named after the project")
 
 
-def test_answers_reach_the_session_that_asked():
+def test_an_answer_in_an_old_numbered_topic_still_reaches_the_session():
+    """Groups that ran the numbered-thread version still have those topics.
+    Nothing writes to them now, but a reply typed into one out of habit must
+    still wake the session rather than queue a task in front of it."""
     d = make_daemon("s.json", away=True)
     key = cfgmod.normalize(PROJECT)
-    d.state["topics"][key] = 11             # slot 1
-    d.state["topics"][key + "#2"] = 22      # slot 2
-    d.sessions["a"] = {"project": key, "name": "P", "alive": True}
-    d.sessions["b"] = {"project": key, "name": "P", "alive": True}
-    d.slot_for(key, "a")
-    d.slot_for(key, "b")
+    d.state["topics"][key] = 72
+    d.state["topics"][key + "#2"] = 446      # left over from that version
 
-    first = daemon_module.Waiter("stop", "a", key)
-    second = daemon_module.Waiter("stop", "b", key)
-    d.waiters[first.id] = first
-    d.waiters[second.id] = second
-    d.by_topic[11] = first.id
-    d.by_topic[22] = second.id
+    waiter = daemon_module.Waiter("stop", "a", key)
+    d.waiters[waiter.id] = waiter
+    d.by_topic[72] = waiter.id
 
-    d.deliver_text("для второй сессии", 22,
-                   {"chat": {"id": -100}, "message_thread_id": 22})
-    assert second.result == {"action": "continue", "text": "для второй сессии"}
-    assert first.result is None, "the answer leaked into the wrong session"
-    print("PASS an answer lands in the session whose thread it was typed in")
+    d.deliver_text("продовжуй", 446,
+                   {"chat": {"id": -100}, "message_thread_id": 446})
+    assert waiter.result == {"action": "continue", "text": "продовжуй"},         "the session was left asleep"
+    assert not d.queue.get(key), "it should have woken it, not queued"
+    print("PASS a reply in a leftover thread still wakes the session")
+
+
+def test_a_window_closed_without_goodbye_is_forgotten():
+    """A window killed without a SessionEnd left a session that looked alive
+    forever, which convinced spawn that somebody was listening."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.sessions["ghost"] = {"project": key, "name": "P", "alive": True,
+                           "last_seen": time.time() - d.SESSION_TTL - 60}
+    d.sessions["real"] = {"project": key, "name": "P", "alive": True,
+                          "last_seen": time.time()}
+    assert d.session_alive(d.sessions["real"]) is True
+    assert d.session_alive(d.sessions["ghost"]) is False
+
+    d.forget_stale_sessions()
+    assert "ghost" not in d.sessions, "the stale session was kept"
+    assert "real" in d.sessions, "a live session must survive the sweep"
+
+    d.sessions.pop("real")
+    assert d.live_session(key) is False, "nothing should block a spawn now"
+    print("PASS a session with no events for hours is forgotten")
 
 
 def test_a_task_in_any_thread_queues_for_the_project():
@@ -1450,61 +1454,6 @@ def test_a_task_in_any_thread_queues_for_the_project():
                    {"chat": {"id": -100}, "message_thread_id": 22})
     assert d.queue.get(key) == ["почини сборку"], d.queue
     print("PASS a task typed in a numbered thread queues under the project")
-
-
-def test_a_second_session_can_be_answered_at_all():
-    """The bug: a session in slot #2 posted its question into thread #2, but
-    the waiter was filed under the project's first topic. Answering where the
-    buttons actually were found no waiter and queued the text instead."""
-    d = make_daemon("s.json", away=True)
-    key = cfgmod.normalize(PROJECT)
-    d.state["topics"][key] = 72             # slot 1
-    d.state["topics"][key + "#2"] = 446     # slot 2
-    # slot 1 is held by another, still-running session
-    d.sessions["first"] = {"project": key, "name": "P", "alive": True}
-    d.slot_for(key, "first")
-
-    box, thread = run_async(d, evt("Stop", session_id="second"))
-    assert wait_for(lambda: d.by_topic.get(446)), \
-        "the waiter was not reachable from the thread it posted into"
-    assert 72 not in d.by_topic, "it must not answer for the other session"
-
-    d.deliver_text("продолжай тут", 446,
-                   {"chat": {"id": -100}, "message_thread_id": 446})
-    thread.join(5)
-    assert box["result"] == {"decision": "block", "reason": "продолжай тут"}, box
-    assert not d.queue.get(key), "the text should have woken it, not queued"
-    print("PASS a session in the second thread wakes when answered there")
-
-
-def test_a_window_closed_without_goodbye_stops_holding_its_thread():
-    """A window killed without a SessionEnd left a session that looked alive
-    forever: it kept a numbered thread and convinced spawn that somebody was
-    listening, so tasks queued for a session that was never coming back."""
-    d = make_daemon("s.json", away=False)
-    key = cfgmod.normalize(PROJECT)
-    # Both are working windows when the numbers are handed out.
-    d.sessions["ghost"] = {"project": key, "name": "P", "alive": True,
-                           "last_seen": time.time()}
-    d.sessions["real"] = {"project": key, "name": "P", "alive": True,
-                          "last_seen": time.time()}
-    assert d.slot_for(key, "ghost") == 1
-    assert d.slot_for(key, "real") == 2
-
-    # Then one of them is closed without a SessionEnd and simply goes quiet.
-    d.sessions["ghost"]["last_seen"] = time.time() - d.SESSION_TTL - 60
-    assert d.session_alive(d.sessions["real"]) is True
-    assert d.session_alive(d.sessions["ghost"]) is False
-
-    d.forget_stale_sessions()
-    assert "ghost" not in d.sessions, "the stale session was kept"
-    assert "real" in d.sessions, "a live session must survive the sweep"
-    assert d.slot_for(key, "another") == 1, "the ghost's number was not freed"
-
-    # and it no longer blocks a spawn
-    d.sessions.pop("real")
-    assert d.live_session(key) is False
-    print("PASS a session with no events for hours stops holding its thread")
 
 
 def test_a_refused_poll_slows_the_whole_cadence_down():

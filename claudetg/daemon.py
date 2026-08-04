@@ -55,11 +55,8 @@ class Waiter:
         self.event = threading.Event()
         self.result = None
         self.message_ids = []
-        # The thread its question went to. Not the project's first topic: with
-        # several sessions per project the question lands in that session's
-        # own numbered thread, and the answer arrives back through the same
-        # one. Deriving it from the project instead sent replies to slot 1 and
-        # left every other session unreachable.
+        # The thread its question went to, so the answer comes back the same
+        # way rather than being derived from the project again.
         self.thread = None
 
     def resolve(self, result):
@@ -101,6 +98,7 @@ class Daemon:
         self.state.setdefault("away", cfg.get("away_default", False))
         self.state.setdefault("offset", None)
         self.state.setdefault("status_message_id", None)
+        self.state.pop("slots", None)   # numbered threads, tried and removed
         self.lock = threading.RLock()
         self.tail_lock = threading.Lock()   # one transcript flush at a time
         self.sessions = {}          # session_id -> live session info
@@ -132,58 +130,19 @@ class Daemon:
         """
         return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
 
-    def slot_for(self, project_key, session_id):
-        """Which numbered thread this session owns.
+    def topic_for(self, project_key, project_name):
+        """Return the project's forum topic, creating it on first use.
 
-        One project can have several windows open at once, and pouring them
-        all into one topic makes the transcript unreadable — worse, an answer
-        typed there could only reach whichever session asked last.
-
-        Sessions come and go while topics are permanent, so a session takes
-        the lowest number no live session is using and gives it back when it
-        ends. Two windows get #1 and #2; close the first, open another, and it
-        becomes #1 again. The group never grows a topic per session.
+        One topic per project, however many windows are open on it. Giving
+        each session its own numbered thread was tried and taken back out:
+        a finished session stops listening, so its thread became a dead end
+        nobody could talk to, and the group filled with them.
         """
-        if not session_id:
-            return 1
         with self.lock:
-            slots = self.state.setdefault("slots", {}).setdefault(project_key, {})
-            for number, owner in slots.items():
-                if owner == session_id:
-                    return int(number)
-            busy = {int(n) for n, owner in slots.items()
-                    if owner and owner != session_id
-                    and self.session_alive(self.sessions.get(owner))}
-            number = 1
-            while number in busy:
-                number += 1
-            slots[str(number)] = session_id
-        self.persist()
-        return number
-
-    def release_slot(self, project_key, session_id):
-        with self.lock:
-            slots = (self.state.get("slots") or {}).get(project_key) or {}
-            for number, owner in list(slots.items()):
-                if owner == session_id:
-                    slots[number] = None        # kept, so the topic is reused
-        self.persist()
-
-    @staticmethod
-    def topic_key(project_key, slot):
-        """Slot 1 keeps the project's own key, so topics created before slots
-        existed keep working untouched."""
-        return project_key if slot <= 1 else f"{project_key}#{slot}"
-
-    def topic_for(self, project_key, project_name, session_id=None):
-        """Return the forum topic id for a session, creating it on first use."""
-        slot = self.slot_for(project_key, session_id)
-        key = self.topic_key(project_key, slot)
-        with self.lock:
-            existing = self.state["topics"].get(key)
+            existing = self.state["topics"].get(project_key)
         if existing:
             return existing
-        title = f"{project_name} #{slot}"
+        title = project_name
         try:
             topic = self.bot.create_topic(self.cfg["chat_id"], title[:128])
             tid = topic["message_thread_id"]
@@ -191,21 +150,20 @@ class Daemon:
             log("createForumTopic failed:", e, "- falling back to General")
             tid = None
         with self.lock:
-            self.state["topics"][key] = tid
+            self.state["topics"][project_key] = tid
         self.persist()
         return tid
 
     def send(self, project_key, project_name, text, markup=None, silent=None,
-             session=None, thread=None):
-        """Send rendered HTML to a session's topic. Returns message ids.
+             thread=None):
+        """Send rendered HTML to the project's topic. Returns message ids.
 
-        `session` picks the numbered thread; `thread` overrides it outright,
-        for replies that must land where the question was asked.
+        `thread` overrides it, for a reply that must land where it was asked.
         """
         if not self.linked():
             return []       # not set up yet: stay silent instead of timing out
         if thread is None:
-            thread = self.topic_for(project_key, project_name, session)
+            thread = self.topic_for(project_key, project_name)
         if silent is None:
             silent = not self.away
         ids = []
@@ -336,7 +294,7 @@ class Daemon:
         if not key:
             return
         ids = self.send(key, name, render.render(text, header=f"💬 <b>{html.escape(name)}</b>"),
-                        silent=not self.away, session=session_id)
+                        silent=not self.away)
         if not ids:
             return      # nothing reached the chat: let the closing message carry it
         with self.lock:
@@ -705,10 +663,6 @@ class Daemon:
                                 "last_seen": time.time(),
                                 "cwd": data.get("cwd") or session.get("cwd")})
             self.track_transcript(session_id, data.get("transcript_path"))
-            # Claim the number now, not at the first message: a session that
-            # stays silent still occupies a window, and the next one must not
-            # be handed the same thread.
-            self.slot_for(key, session_id)
         handler = {
             "SessionStart": self.on_session_start,
             "SessionEnd": self.on_session_end,
@@ -737,7 +691,7 @@ class Daemon:
             mode = t("mode.away") if self.away else t("mode.atpc")
             self.send(key, name,
                       t("session.opened", name=html.escape(name), mode=mode),
-                      silent=True, session=sid)
+                      silent=True)
         return self.drain_queue(key)
 
     def on_session_end(self, data, key, name):
@@ -750,13 +704,9 @@ class Daemon:
                 summary = self.git_summary(data.get("cwd"))
                 if summary:
                     note += f"\n{summary}"
-            self.send(key, name, note, silent=True, session=session_id)
-        # Only now: the closing note still belonged in this session's thread,
-        # and dropping it from self.sessions first would hand the slot away
-        # mid-sentence.
+            self.send(key, name, note, silent=True)
         with self.lock:
             self.sessions.pop(session_id, None)
-        self.release_slot(key, session_id)
         return {}
 
     def on_prompt_submit(self, data, key, name):
@@ -778,14 +728,13 @@ class Daemon:
         detail = _describe_failure(data) or t("fail.api.text")
         head = render.header("🛑", t("fail.api.head", name=name))
         self.send(key, name, render.render(f"```\n{detail[:1500]}\n```", header=head),
-                  silent=False, session=data.get("session_id"))
+                  silent=False)
         return {}
 
     def on_notification(self, data, key, name):
         message = data.get("message") or ""
         if message and self.should_log("notification"):
-            self.send(key, name, f"🔔 {html.escape(message)}",
-                      session=data.get("session_id"))
+            self.send(key, name, f"🔔 {html.escape(message)}")
         return {}
 
     ICONS = {"completed": "✅", "in_progress": "🔸", "pending": "▫️"}
@@ -826,7 +775,7 @@ class Daemon:
                 if "not modified" in (e.description or "").lower():
                     return
                 log("todo edit failed, posting fresh:", e)
-        ids = self.send(key, name, text, silent=True, session=session_id)
+        ids = self.send(key, name, text, silent=True)
         if ids:
             with self.lock:
                 self.state.setdefault("todo_msgs", {})[session_id] = ids[-1]
@@ -850,8 +799,7 @@ class Daemon:
             body.append(f"```\n{detail[:1500]}\n```")
         if not body:
             body.append(t("fail.tool.empty"))
-        self.send(key, name, render.render("\n\n".join(body), header=head),
-                  session=data.get("session_id"))
+        self.send(key, name, render.render("\n\n".join(body), header=head))
         return {}
 
     def on_stop(self, data, key, name):
@@ -885,21 +833,21 @@ class Daemon:
         if queued:
             # A task was sent while nobody was listening: run it now.
             self.send(key, name, self.closing(text, render.header("✅", name, seconds),
-                                              streamed), session=sid)
+                                              streamed))
             self.report_usage()
             self.send(key, name, t("queue.next", task=html.escape(queued[0][:300])),
-                      silent=True, session=sid)
+                      silent=True)
             return {"decision": "block", "reason": _join_tasks(queued)}
 
         head = render.header("✅", name, seconds)
         if not self.away:
             if self.should_log("stop"):
                 self.send(key, name, self.closing(text, head, streamed),
-                          silent=True, session=sid)
+                          silent=True)
             self.report_usage()
             return {}
 
-        thread = self.topic_for(key, name, sid)
+        thread = self.topic_for(key, name)
         waiter = Waiter("stop", sid, key)
         markup = {"inline_keyboard": [[
             {"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
@@ -914,10 +862,10 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result:
-            self.send(key, name, t("stop.timeout"), silent=True, session=sid)
+            self.send(key, name, t("stop.timeout"), silent=True)
             return {}
         if result.get("released"):
-            self.send(key, name, t("stop.released"), silent=True, session=sid)
+            self.send(key, name, t("stop.released"), silent=True)
             return {}
         if result.get("action") == "end":
             return {}
@@ -945,7 +893,7 @@ class Daemon:
             return {}
 
         session_id = data.get("session_id")
-        thread = self.topic_for(key, name, session_id)
+        thread = self.topic_for(key, name)
         waiter = Waiter("ask", session_id, key,
                         {"questions": questions, "answers": {}})
         ids = []
@@ -958,8 +906,7 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result or result.get("released"):
-            self.send(key, name, t("ask.timeout"), silent=True,
-                      session=data.get("session_id"))
+            self.send(key, name, t("ask.timeout"), silent=True)
             return {}
         return {
             "hookSpecificOutput": {
@@ -1040,15 +987,12 @@ class Daemon:
                        for s in self.sessions.values())
 
     def forget_stale_sessions(self):
-        """Drop sessions nothing has been heard from, and free their threads."""
+        """Drop sessions nothing has been heard from in hours."""
         with self.lock:
-            stale = [(sid, s.get("project")) for sid, s in self.sessions.items()
+            stale = [sid for sid, s in self.sessions.items()
                      if not self.session_alive(s)]
-            for sid, _ in stale:
+            for sid in stale:
                 self.sessions.pop(sid, None)
-        for sid, project in stale:
-            if project:
-                self.release_slot(project, sid)
         if stale:
             log(f"forgot {len(stale)} session(s) with no events for "
                 f"{self.SESSION_TTL // 3600}h")
@@ -1247,9 +1191,16 @@ class Daemon:
 
     def deliver_text(self, text, thread, message):
         """Route a plain message: to a waiting hook, or onto the project queue."""
+        key = self.project_by_topic(thread)
         with self.lock:
             wid = self.by_topic.get(thread)
             waiter = self.waiters.get(wid) if wid else None
+            if waiter is None and key:
+                # Typed into one of the project's older numbered topics: the
+                # session listening on the project is still the right one to
+                # hand this to, rather than queueing it in front of itself.
+                waiter = next((w for w in self.waiters.values()
+                               if w.project == key), None)
         if waiter and waiter.kind == "stop":
             waiter.resolve({"action": "continue", "text": text})
             self.ack(message, t("ack.continue"))
@@ -1257,7 +1208,6 @@ class Daemon:
         if waiter and waiter.kind == "ask":
             self.answer_by_text(waiter, text, message)
             return
-        key = self.project_by_topic(thread)
         if not key or key in {k for k, _ in self.SERVICE_TOPICS}:
             return      # the limits and status topics own no session to task
         if self.try_spawn(key, text, message):
@@ -1693,7 +1643,13 @@ class Daemon:
             log("status send failed:", e)
 
     def project_by_topic(self, thread):
-        """The project a thread belongs to, slot suffix stripped."""
+        """The project a thread belongs to.
+
+        The `#2`, `#3` suffixes are leftovers from the numbered threads that
+        were tried and removed. Nothing writes to those topics any more, but
+        they still exist in groups that ran that version, so a message typed
+        into one still finds its project instead of falling on the floor.
+        """
         with self.lock:
             for key, tid in self.state["topics"].items():
                 if tid == thread:
