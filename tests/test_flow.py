@@ -236,6 +236,28 @@ def test_task_reaches_a_turn_already_running():
     print("PASS a task typed mid-turn reaches the running session")
 
 
+def test_every_topic_carries_the_switch():
+    """Handing control over must not mean going to look for the button."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.linked = lambda: True
+
+    topic = d.topic_for(key, "TGbotClaude")
+    pinned = d.state["status_msgs"]
+    assert str(topic) in pinned, pinned
+    posted = [m for m in d.bot.sent if m.get("markup")]
+    assert posted and posted[-1]["thread"] == topic, "the switch goes in the topic"
+    assert any(b["callback_data"] == "mode"
+               for row in posted[-1]["markup"]["inline_keyboard"] for b in row)
+
+    # Flipping the mode edits what is there instead of posting it again.
+    before = len(d.bot.sent)
+    d.refresh_topic_switches()
+    assert len(d.bot.sent) == before, "a refresh must not repost the switch"
+    assert d.bot.edits and d.bot.edits[-1]["id"] == pinned[str(topic)]
+    print("PASS the switch is pinned in each topic and edited in place")
+
+
 def test_a_shared_directory_belongs_to_nobody():
     """Four projects work through the same game client. Each keeps its own.
 

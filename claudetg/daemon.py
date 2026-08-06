@@ -209,6 +209,11 @@ class Daemon:
         with self.lock:
             self.state["topics"][project_key] = tid
         self.persist()
+        if tid:
+            # A topic without the switch is a topic you cannot hand control
+            # over from, and a new one is created exactly when somebody starts
+            # working somewhere new.
+            self.refresh_topic_switches(only=tid)
         return tid
 
     def send(self, project_key, project_name, text, markup=None, silent=None,
@@ -1971,9 +1976,58 @@ class Daemon:
             "callback_data": "mode",
         }]]}
 
+    def switch_in_topic(self, tid, text, markup):
+        """Put the switch at the top of one topic, or bring it up to date."""
+        with self.lock:
+            mid = (self.state.get("status_msgs") or {}).get(str(tid))
+        if mid:
+            try:
+                self.bot.edit_message(self.cfg["chat_id"], mid, text, markup=markup)
+                return
+            except TelegramError as e:
+                if "not modified" in (e.description or "").lower():
+                    return              # nothing changed; not an error
+                log("topic switch edit failed:", e)
+        try:
+            msg = self.bot.send_message(self.cfg["chat_id"], text, thread_id=tid,
+                                        markup=markup, silent=True)
+        except TelegramError as e:
+            log("topic switch failed:", e)
+            return
+        with self.lock:
+            self.state.setdefault("status_msgs", {})[str(tid)] = msg["message_id"]
+        try:
+            self.bot.pin_message(self.cfg["chat_id"], msg["message_id"])
+        except TelegramError as e:
+            # Pinning is the nice-to-have; the message with the button is the
+            # point, and it stays whether or not it can be pinned.
+            log("topic switch pin failed:", e)
+
+    def refresh_topic_switches(self, only=None):
+        """The switch, pinned in every project topic rather than only the one.
+
+        The status message lives in the group itself, which a forum shows as a
+        tab of its own: the one button that hands control over was a tab away
+        from every topic the work actually happens in. Each topic keeps its own
+        copy, edited in place, so this costs a handful of edits when the mode
+        changes and nothing at all in between.
+        """
+        if not self.linked():
+            return
+        service = {k for k, _ in self.SERVICE_TOPICS}
+        with self.lock:
+            topics = [tid for key, tid in self.state["topics"].items()
+                      if tid and key not in service]
+        text, markup = self.status_text(), self.mode_markup()
+        for tid in topics:
+            if only is None or tid == only:
+                self.switch_in_topic(tid, text, markup)
+        self.persist()
+
     def refresh_status(self):
         if not self.linked():
             return
+        self.refresh_topic_switches()
         markup = self.mode_markup()
         text = self.status_text()
         mid = self.state.get("status_message_id")
