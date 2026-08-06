@@ -408,16 +408,49 @@ def test_a_turn_that_ends_at_the_desk_is_not_held():
     d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
     d.cfg["stop_grace"] = {"enabled": True, "seconds": 30}
     untouched = daemon_module.input_idle_seconds
+    was_front = daemon_module.foreground_app
     # Touched a moment ago, and the turn ran for a while before that: the
     # touch is newer than the wait, which is what "still here" means.
     daemon_module.input_idle_seconds = lambda: 0.0
+    daemon_module.foreground_app = lambda: "code.exe"
     try:
         start = time.time()
         assert d.handle_event(evt("Stop")) == {}
         assert time.time() - start < 3, "a working desk must not be held up"
     finally:
         daemon_module.input_idle_seconds = untouched
+        daemon_module.foreground_app = was_front
     print("PASS a turn ending at a busy desk is let go at once")
+
+
+def test_reaching_for_the_switch_does_not_end_the_hold():
+    """The click that presses the button is input like any other.
+
+    It reaches this machine a moment before the button reaches Telegram and
+    comes back, so counting it as "back at the desk" let go of the very turn
+    the press was meant to keep. Pressed from a phone it worked; pressed in
+    Telegram on the same screen it never could.
+    """
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 10}
+    d.refresh_status = lambda: None
+    untouched, was_front = (daemon_module.input_idle_seconds,
+                            daemon_module.foreground_app)
+    daemon_module.input_idle_seconds = lambda: 0.0        # the mouse is moving
+    daemon_module.foreground_app = lambda: "telegram.exe"  # ...in Telegram
+    try:
+        box, thread = run_async(d, evt("Stop"))
+        time.sleep(0.8)
+        assert not box, "a click in Telegram must not let the turn go"
+        d.set_away(True)
+        assert wait_for(lambda: d.waiters), "the switch must still find it"
+        d.on_callback({"id": "cb", "data": f"end:{next(iter(d.waiters))}"})
+        thread.join(3)
+    finally:
+        daemon_module.input_idle_seconds = untouched
+        daemon_module.foreground_app = was_front
+    print("PASS reaching for the switch does not end the hold")
 
 
 def test_a_finished_turn_is_not_promised_a_next_step():

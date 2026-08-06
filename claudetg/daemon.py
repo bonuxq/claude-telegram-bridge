@@ -43,6 +43,37 @@ def log(*parts):
             pass
 
 
+CHAT_APPS = ("telegram.exe", "telegram desktop.exe", "unigram.exe", "64gram.exe")
+
+
+def foreground_app():
+    """The program in front right now, lower-cased, or None if unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(),
+                                        ctypes.byref(pid))
+        if not pid.value:
+            return None
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)  # LIMITED_INFO
+        if not handle:
+            return None
+        try:
+            size = wintypes.DWORD(260)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buf,
+                                                       ctypes.byref(size)):
+                return None
+            return buf.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 def input_idle_seconds():
     """Seconds since the last key press or mouse movement, system-wide.
 
@@ -1249,6 +1280,13 @@ class Daemon:
                 return
             idle = input_idle_seconds()
             if idle is not None and idle < waited:
+                if foreground_app() in CHAT_APPS:
+                    # Reaching for the switch is not coming back to work. The
+                    # click that presses it counts as input, and it lands here
+                    # a second before the switch does, so counting it let go of
+                    # the very turn the press was meant to keep.
+                    time.sleep(0.25)
+                    continue
                 return          # somebody is at the desk: do not hold them up
             time.sleep(0.25)
 
@@ -1991,6 +2029,9 @@ class Daemon:
             "callback_data": "mode",
         }]]}
 
+    # Between full passes over every topic, whatever asks for them.
+    SWITCH_MIN_GAP = 15
+
     def forget_topic(self, tid):
         """Drop a topic that no longer exists, so a new one is made instead.
 
@@ -2007,7 +2048,13 @@ class Daemon:
         log("topic", tid, "is gone; it will be created again on demand")
 
     def switch_in_topic(self, tid, text, markup):
-        """Put the switch at the top of one topic, or bring it up to date."""
+        """Put the switch at the top of one topic, or bring it up to date.
+
+        Posted once and only ever edited afterwards. The first version fell
+        back to posting whenever an edit failed, which on a rate limit meant a
+        second copy in every topic, and a pin with it — a refresh turned into
+        a storm, and Telegram raised itself over the editor for each one.
+        """
         with self.lock:
             mid = (self.state.get("status_msgs") or {}).get(str(tid))
         if mid:
@@ -2015,26 +2062,21 @@ class Daemon:
                 self.bot.edit_message(self.cfg["chat_id"], mid, text, markup=markup)
                 return
             except TelegramError as e:
-                if "not modified" in (e.description or "").lower():
-                    return              # nothing changed; not an error
-                log("topic switch edit failed:", e)
+                if _thread_gone(e):
+                    return self.forget_topic(tid)
+                if not _message_gone(e):
+                    log("topic switch edit failed:", e)
+                    return      # transient: the copy that is there still works
         try:
             msg = self.bot.send_message(self.cfg["chat_id"], text, thread_id=tid,
                                         markup=markup, silent=True)
         except TelegramError as e:
             if _thread_gone(e):
-                self.forget_topic(tid)
-                return
+                return self.forget_topic(tid)
             log("topic switch failed:", e)
             return
         with self.lock:
             self.state.setdefault("status_msgs", {})[str(tid)] = msg["message_id"]
-        try:
-            self.bot.pin_message(self.cfg["chat_id"], msg["message_id"])
-        except TelegramError as e:
-            # Pinning is the nice-to-have; the message with the button is the
-            # point, and it stays whether or not it can be pinned.
-            log("topic switch pin failed:", e)
 
     def refresh_topic_switches(self, only=None):
         """The switch, pinned in every project topic rather than only the one.
@@ -2047,6 +2089,13 @@ class Daemon:
         """
         if not self.linked():
             return
+        now = time.time()
+        if only is None:
+            # One pass touches every topic, so a burst of mode changes would
+            # multiply into a burst per topic.
+            if now - getattr(self, "_switches_at", 0) < self.SWITCH_MIN_GAP:
+                return
+            self._switches_at = now
         service = {k for k, _ in self.SERVICE_TOPICS}
         with self.lock:
             topics = [tid for key, tid in self.state["topics"].items()
@@ -2132,6 +2181,14 @@ def _describe_failure(data):
 def _strip_tags(text):
     import re
     return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+def _message_gone(error):
+    """The message we meant to edit is not there to edit any more."""
+    text = (getattr(error, "description", "") or "").lower()
+    return getattr(error, "code", None) == 400 and (
+        "message to edit not found" in text or "message can't be edited" in text
+        or "message identifier is not specified" in text)
 
 
 def _thread_gone(error):
