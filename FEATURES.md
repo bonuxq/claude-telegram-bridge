@@ -32,17 +32,115 @@ Away mode only. At the PC the question stays in the editor.
 
 ## Tasks from your phone
 
-When Claude finishes a turn, the topic gets a message with **«▶️ Continue»**
-and **«⏹ Enough»**. Any text you write into the topic becomes the next task —
-the session carries on without you.
+When Claude finishes a turn, the topic gets a message with **Continue**,
+**Waiting** and **Enough**. Any text you write into the topic becomes the next
+task - the session carries on without you.
 
-If you do not answer within the hour, the session simply stops. Anything you
-write **later** is not lost: Telegram keeps unread messages for about a day,
-the bridge queues them and hands them over on the next turn or the next
-session start. `/queue` shows what is waiting.
+**Waiting** lets the turn end without saying a word to the session: nothing it
+did not ask for lands in its transcript. Use it when it set itself something to
+come back to and the wait is the only thing in the way. With `wake_alarm` on,
+this leaves it an alarm as well.
 
-Without `spawn` (below), a task can only reach a session that exists — it
-waits in the queue until you open the project.
+A message typed **while a turn is running** does not wait for that turn to
+finish. It is handed over at the session's next batch of tool calls, the same
+way typing into the editor mid-action reaches it. The acknowledgement says
+which of three things is happening:
+
+| Reply | What it means |
+|---|---|
+| handing this over at its next step | a turn is running; seconds away |
+| the session is between turns | the window is open; it takes this the moment it moves |
+| nothing is open here | no session at all; the task waits for one |
+
+Anything written when nothing is listening is not lost: Telegram keeps unread
+messages for about a day, the bridge queues them and hands them over on the
+next turn or the next session start. `/queue` shows what is waiting.
+
+Without `spawn` (below), a task can only reach a session that exists - it waits
+in the queue until you open the project.
+
+## Holding a finished turn · `stop_grace`
+
+The hook that ends a turn is the only door into a session. Once it has
+answered, nothing outside can start a turn there: flipping to away a minute
+later reaches a session that no longer hears anything, and the task you type
+can only wait for whatever you next type at the keyboard.
+
+So a turn that ends while you are at the PC keeps its hook for a while. The
+clock is not the point - the desk is:
+
+* **the first touch of keyboard or mouse ends it at once**, so a turn ending
+  while you work is not held at all;
+* a turn ending after you have walked away is held while nobody comes back, up
+  to `seconds` (an hour by default);
+* flipping the switch during the hold turns it into the ordinary away wait,
+  buttons and all - same session, in the editor, no agent anywhere;
+* a press of the switch is itself a click, and it reaches this machine before
+  it reaches Telegram and comes back, so a touch waits out that round trip
+  before it counts as somebody sitting back down. A press in Telegram or in the
+  widget is not "back at work".
+
+The summary is sent before the hold rather than after, so nothing you are
+waiting for waits on it. Coming back to the keyboard releases the wait and then
+holds once more, so stepping away again a moment later still finds a door open.
+
+The one case a hold cannot cover: touching the desk and then leaving without
+flipping the switch. While the hook is held the editor cannot be typed into, so
+a touch has to end it.
+
+## Alarm · `wake_alarm`
+
+**Off by default.** What it solves: nothing outside a session can start a turn
+in it. A session whose wait has run out is not asleep - it is unreachable, and
+stays that way until somebody types at the keyboard.
+
+A session can be woken by its own work, though. A command started in the
+background wakes it when it finishes, so a wait that nobody answers ends by
+asking the session to sleep for the interval and stop there. The turn it wakes
+into is a turn the chat can reach.
+
+**The round it makes, while you are away:**
+
+1. a turn ends; the topic gets the summary and the buttons;
+2. nobody answers for the interval - the wait is cut to it, rather than sitting
+   there for the four hours it otherwise would;
+3. the topic says `Nobody answered - checking back in N min`, and the session is
+   asked to start `sleep` in the background and end the turn;
+4. it wakes when that finishes, and anything typed meanwhile is handed to it at
+   its first batch of tool calls;
+5. that turn ends, and the round begins again.
+
+So while you are away the session is reachable at every check-in, as well as
+the whole time any turn is running. Pressing **Waiting** leaves the same alarm
+behind, so answering does not end the round either.
+
+**What it costs.** One turn per interval - small, but not nothing, and it is
+your rate limit. Fifteen minutes is four an hour. That is why it ships off.
+
+**What it cannot do.** The alarm is set from inside a hook, so a turn has to be
+ending for one to be left behind. Flip the switch while a session already sits
+idle - with the hold gone - and there is nothing to arm it from: the round
+starts at the first turn that ends while away, and sustains itself from there.
+
+**Where to set it.** The widget's menu has *Alarm...*: minutes, Apply, and zero
+for off. The card shows how long it is set for, and says plainly when it is not
+running, which is whenever you are at the PC.
+
+## A topic per chat · `session_topics`
+
+**Off by default**, and one topic per project without it, however many windows
+are open on that project.
+
+With it on, each chat gets a numbered thread of its own: the first keeps the
+project's topic, the second becomes "Project #2". The number belongs to the
+chat's session id and is never handed back, which is the whole difference from
+the version of this that was tried and removed - that one numbered by slot and
+freed the number when the window closed, so continuing the same conversation
+landed it in whichever thread happened to be free.
+
+Close the editor, reopen the same chat, and it goes on in its thread. Start a
+new chat and it gets a new number. A thread whose chat can be reopened is not a
+dead end.
 
 ## Headless agent · `spawn`
 
