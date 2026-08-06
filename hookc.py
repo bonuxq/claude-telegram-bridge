@@ -99,16 +99,44 @@ def in_scope(cfg, cwd, transcript=None):
     if cfg.get("auto_discover", False):
         return True
 
-    if not cwd:
-        return False
-    key = norm(cwd)
-    for root, meta in cfg.get("projects", {}).items():
-        candidates = [root] + list((meta or {}).get("extra_paths") or [])
-        for candidate in candidates:
-            candidate = norm(candidate)
-            if key == candidate or key.startswith(candidate.rstrip("/") + "/"):
-                return True
+    # Where the session was opened decides, the same way the daemon decides.
+    # `cwd` moves: a session that walks into a shared directory would be
+    # dropped here, before the daemon ever got the chance to recognise it.
+    for path in (home_cwd(transcript), cwd):
+        if not path:
+            continue
+        key = norm(path)
+        for root, meta in cfg.get("projects", {}).items():
+            candidates = [root] + list((meta or {}).get("extra_paths") or [])
+            for candidate in candidates:
+                candidate = norm(candidate)
+                if key == candidate or key.startswith(candidate.rstrip("/") + "/"):
+                    return True
     return False
+
+
+def home_cwd(transcript):
+    """The directory the session was opened in, from its own transcript.
+
+    Kept here rather than imported: this client runs on every hook and imports
+    nothing it does not need. Only the head of the file is read, so the cost
+    does not grow with the conversation.
+    """
+    if not transcript or not os.path.exists(transcript):
+        return None
+    try:
+        with open(transcript, "rb") as f:
+            head = f.read(64_000)
+    except OSError:
+        return None
+    for line in head.split(b"\n"):
+        try:
+            entry = json.loads(line.decode("utf-8", errors="replace"))
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(entry, dict) and entry.get("cwd"):
+            return entry["cwd"]
+    return None
 
 
 def norm(path):

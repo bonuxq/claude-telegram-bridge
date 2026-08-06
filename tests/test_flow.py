@@ -236,6 +236,36 @@ def test_task_reaches_a_turn_already_running():
     print("PASS a task typed mid-turn reaches the running session")
 
 
+def test_a_shared_directory_belongs_to_nobody():
+    """Four projects work through the same game client. Each keeps its own.
+
+    Binding the shared directory to one project files everybody else's
+    sessions under that one, and no directory can answer this question: the
+    session's own transcript can, because its first entry is where it was
+    opened.
+    """
+    d = make_daemon("s.json", away=False)
+    client = "E:/563 client/system"
+    roots = {f"e:/project{n}": f"Project {n}" for n in range(1, 5)}
+    d.cfg["projects"] = {cfgmod.normalize(r): {"name": n, "extra_paths": [client]}
+                         for r, n in roots.items()}
+
+    for root, name in roots.items():
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"home-{name.replace(' ', '')}.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"cwd": root, "type": "user"}) + "\n")
+        try:
+            # Every one of them is standing in the shared client right now.
+            resolved = d.resolve_project(
+                {"hook_event_name": "PostToolBatch", "cwd": client,
+                 "session_id": f"s-{name}", "transcript_path": path})
+        finally:
+            os.remove(path)
+        assert resolved[0] == cfgmod.normalize(root), f"{name} -> {resolved}"
+    print("PASS sessions sharing a directory keep their own projects")
+
+
 def test_a_session_keeps_its_project_when_it_wanders():
     """Seen live: a converter working through a game client changed topics.
 

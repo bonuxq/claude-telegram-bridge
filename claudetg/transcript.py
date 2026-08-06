@@ -9,6 +9,37 @@ import json
 import os
 
 TAIL_BYTES = 1_000_000
+# The opening entries carry the directory the session was started in. A few
+# kilobytes reach it however long the conversation grows.
+HEAD_BYTES = 64_000
+
+
+def home_cwd(path):
+    """The directory this session was opened in, or None.
+
+    A hook reports the directory the session is standing in right now, which
+    moves: one converter session here walks through a game client and an
+    archived one, both shared with other projects, and every event fired from
+    there used to be filed under whoever owned that directory. Where a session
+    was opened does not move, and it is written down in its own transcript —
+    on disk, so it survives a restart of this daemon as well.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            head = f.read(HEAD_BYTES)
+    except OSError:
+        return None
+    for line in head.split(b"\n"):
+        try:
+            entry = json.loads(line.decode("utf-8", errors="replace"))
+        except (ValueError, AttributeError):
+            continue
+        cwd = isinstance(entry, dict) and entry.get("cwd")
+        if cwd:
+            return cwd
+    return None
 
 
 def _tail_lines(path, limit=TAIL_BYTES):

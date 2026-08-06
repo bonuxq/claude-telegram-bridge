@@ -719,6 +719,30 @@ class Daemon:
 
     # -- hook events ----------------------------------------------------
 
+    def session_home(self, data):
+        """Where this session was opened, which is what it belongs to.
+
+        A shared directory cannot answer this: a game client is worked on from
+        four or five projects, and binding it to one of them files everybody
+        else's sessions under that one. Each session has its own transcript
+        and its own first entry, so each answers for itself.
+
+        Read once per session and remembered. Falls back to the current
+        directory when there is no transcript to ask — a session that has one
+        is the normal case, and one that does not is no worse off than before.
+        """
+        session_id = data.get("session_id")
+        with self.lock:
+            cached = (self.sessions.get(session_id) or {}).get("home")
+        if cached:
+            return cached
+        home = transcript.home_cwd(data.get("transcript_path"))
+        home = home or data.get("cwd") or ""
+        if session_id:
+            with self.lock:
+                self.sessions.setdefault(session_id, {})["home"] = home
+        return home
+
     def resolve_project(self, data):
         """(key, display name) for an event, or None to stay out of the way.
 
@@ -745,7 +769,7 @@ class Daemon:
                 # because the client directory is bound to another project.
                 return known["project"], known.get("name") or "?"
 
-        match = cfgmod.project_for(self.cfg, cwd)
+        match = cfgmod.project_for(self.cfg, self.session_home(data))
         if match:
             key, meta = match
             return key, meta.get("name") or os.path.basename(key.rstrip("/"))
