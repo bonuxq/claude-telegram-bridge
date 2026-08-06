@@ -728,6 +728,7 @@ class Daemon:
             "UserPromptSubmit": self.on_prompt_submit,
             "PreToolUse": self.on_pre_tool_use,
             "PostToolUse": self.on_post_tool_use,
+            "PostToolBatch": self.on_post_tool_batch,
             "PostToolUseFailure": self.on_tool_failure,
             "Notification": self.on_notification,
         }.get(event)
@@ -803,6 +804,36 @@ class Daemon:
         if todos and self.should_log("todo"):
             self.upsert_todos(data.get("session_id"), key, name, todos)
         return {}
+
+    def on_post_tool_batch(self, data, key, name):
+        """Hand over anything typed while the turn was still running.
+
+        Typing into the editor mid-action reaches the session at its next
+        model request; a task typed into Telegram used to wait for the turn
+        to end, so a correction arrived after the work it was meant to
+        correct. This is the same door: the batch has resolved and the next
+        request has not been made yet.
+        """
+        return self.hand_over(key, name, "PostToolBatch")
+
+    def hand_over(self, key, name, event):
+        """Give the project's queue to the turn that is running right now.
+
+        Nothing is said when the queue is empty, which is almost every batch
+        of almost every turn — this runs on the session's hot path and must
+        cost nothing when there is nothing to say.
+        """
+        with self.lock:
+            if not self.queue.get(key):
+                return {}
+        items = self.take_queue(key)
+        if not items:
+            return {}
+        self.send(key, name, t("queue.handed", task=html.escape(items[0][:300])),
+                  silent=True)
+        return {"hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": t("queue.live") + "\n" + _join_tasks(items)}}
 
     def render_todos(self, todos, name):
         done = sum(1 for item in todos if item.get("status") == "completed")
@@ -906,10 +937,11 @@ class Daemon:
 
         thread = self.topic_for(key, name)
         waiter = Waiter("stop", sid, key)
-        markup = {"inline_keyboard": [[
-            {"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
-            {"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"},
-        ]]}
+        markup = {"inline_keyboard": [
+            [{"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
+             {"text": t("btn.hold"), "callback_data": f"hold:{waiter.id}"}],
+            [{"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"}],
+        ]}
         msgs = self.closing(text, head, streamed)
         msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
         ids = self.send(key, name, msgs, markup=markup, thread=thread)
@@ -925,6 +957,14 @@ class Daemon:
             return {}
         if result.get("released"):
             self.send(key, name, t("stop.released"), silent=True)
+            return {}
+        if result.get("action") == "hold":
+            # Let the turn end without saying a word to the session: it set
+            # itself something to wake it, and the wait was the only thing
+            # standing between it and its own alarm. A task typed after this
+            # is handed over on the session's next batch, not at the next end
+            # of turn, so waiting here costs nothing.
+            self.send(key, name, t("stop.hold"), silent=True)
             return {}
         if result.get("action") == "end":
             return {}
@@ -1320,7 +1360,10 @@ class Daemon:
         with self.lock:
             self.queue.setdefault(key, []).append(text)
         self.persist()
-        self.ack(message, t("ack.queued"))
+        # A working session takes this at its next batch, so "queued" would
+        # read as a longer wait than it is.
+        self.ack(message, t("ack.handoff") if self.live_session(key)
+                 else t("ack.queued"))
 
     def answer_by_text(self, waiter, text, message):
         """Free-text reply to a question message answers that question."""
@@ -1356,6 +1399,8 @@ class Daemon:
         if parts[0] == "go":
             waiter.resolve({"action": "continue",
                             "text": t("task.default")})
+        elif parts[0] == "hold":
+            waiter.resolve({"action": "hold"})
         elif parts[0] == "end":
             waiter.resolve({"action": "end"})
         elif parts[0] in ("a", "m", "d"):

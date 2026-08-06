@@ -203,6 +203,56 @@ def test_queue_when_nobody_listens():
     print("PASS queued task is delivered on the next Stop")
 
 
+def test_task_reaches_a_turn_already_running():
+    """The whole point: a correction must not wait for the work to finish."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.sessions["s1"] = {"project": key, "name": "TGbotClaude", "alive": True,
+                        "last_seen": time.time(), "parked": False}
+
+    d.deliver_text("стой, не трогай config.json", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert d.queue[key] == ["стой, не трогай config.json"]
+    assert d.bot.callbacks == [] and d.bot.sent, "the message must be acknowledged"
+
+    out = d.handle_event(evt("PostToolBatch"))
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolBatch", out
+    assert "не трогай config.json" in context, context
+    assert not d.queue.get(key), "handed over, so it must not arrive twice"
+    assert any("Передал" in m["text"] or "Handed" in m["text"]
+               for m in d.bot.sent), d.bot.sent
+    print("PASS a task typed mid-turn reaches the running session")
+
+
+def test_idle_batch_says_nothing():
+    """This runs on every batch of every turn; empty must stay free."""
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    assert d.handle_event(evt("PostToolBatch")) == {}
+    assert d.bot.sent == [], "an empty queue must not produce chatter"
+    print("PASS an empty queue costs the turn nothing")
+
+
+def test_hold_releases_the_wait_in_silence():
+    """Waiting is not answering: the session must hear nothing at all."""
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    box, thread = run_async(d, evt("Stop"))
+    assert wait_for(lambda: d.waiters), "the away stop must offer its buttons"
+    wid = next(iter(d.waiters))
+
+    markup = next(m["markup"] for m in reversed(d.bot.sent) if m.get("markup"))
+    buttons = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert f"hold:{wid}" in buttons, buttons
+
+    d.on_callback({"id": "cb", "data": f"hold:{wid}"})
+    thread.join(3)
+    assert box["result"] == {}, "nothing may be handed back to the session"
+    print("PASS holding releases the hook without a word to the session")
+
+
 def test_todos_edit_one_message():
     d = make_daemon("s.json", away=False)
     d.cfg["log_when_present"] = ["todo"]  # this test is about rendering, not filtering
