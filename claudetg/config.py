@@ -32,10 +32,14 @@ DEFAULTS = {
     # How long a turn that ends at the keyboard keeps its hook, in case the
     # switch is about to be flipped. Letting it go at once is what made a
     # session unreachable the moment its turn was over: the hook is the only
-    # door back into it, and "away" a minute later found the door gone. The
-    # first touch of keyboard or mouse ends this immediately, so a turn that
-    # ends while you are working is not held at all.
-    "stop_grace": {"enabled": True, "seconds": 600},
+    # door back into it, and "away" a minute later found the door gone.
+    #
+    # An hour, because the real condition is not the clock but the desk: the
+    # first touch of keyboard or mouse ends this at once, so a turn that ends
+    # while you are working is not held at all, and one that ends after you
+    # have walked away is held for as long as nobody comes back. The summary
+    # is sent before the hold rather than after, so nothing waits on it.
+    "stop_grace": {"enabled": True, "seconds": 3600},
     # A topic per chat rather than per project. Off by default: one topic per
     # project is what most people want, and the first attempt at this was
     # taken back out because it numbered threads by slot and handed the number
