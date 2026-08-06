@@ -2107,6 +2107,8 @@ class Daemon:
                 self.bot.edit_message(self.cfg["chat_id"], mid, text, markup=markup)
                 return
             except TelegramError as e:
+                if "not modified" in (e.description or "").lower():
+                    return      # already says exactly this; not an error
                 if _thread_gone(e):
                     return self.forget_topic(tid)
                 if not _message_gone(e):
