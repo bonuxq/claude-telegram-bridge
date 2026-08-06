@@ -243,8 +243,11 @@ def test_a_finished_turn_is_not_promised_a_next_step():
     assert not d.working_session(key), "the turn is over"
 
     d.set_away(True)
-    assert d.sessions["s1"]["parked"], "an unreachable session must say so"
     assert any("⏸" in m["text"] for m in d.bot.sent), d.bot.sent
+    # Out of reach is not abandoned. Parking it here is what sent a message
+    # meant for the window in the editor to a second agent in its directory.
+    assert not d.sessions["s1"].get("parked"), "a minute of quiet is not a goodbye"
+    assert d.live_session(key), "an open editor must keep an agent away"
 
     d.deliver_text("Тест 1", TOPIC,
                    {"chat": {"id": -100}, "message_thread_id": TOPIC})

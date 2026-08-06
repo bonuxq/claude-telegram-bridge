@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2026-07-30T14:20:00Z", "message": {"role": "user", "content": "синтетическая проверка"}}
+{"type": "assistant", "timestamp": "2026-07-30T14:21:47Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Проверка моста: **итог хода** с кодом и `инлайном`.\n\n```js\nconst r = a < b && c > d;  // символы для экранирования\n```\n\nОсталось: подтвердить кнопки опросника."}]}}

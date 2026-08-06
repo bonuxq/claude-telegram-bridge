@@ -1106,8 +1106,8 @@ class Daemon:
                        and s.get("project") == key and s.get("turn_started")
                        for s in self.sessions.values())
 
-    def park_idle(self):
-        """Park every session that finished its turn before the switch flipped.
+    def idle_sessions(self):
+        """Projects whose session finished its turn before the switch flipped.
 
         Its Stop hook has already answered and gone, so nothing fires in it
         again until somebody types in the editor: it cannot be reached from
@@ -1115,18 +1115,23 @@ class Daemon:
         away went on a minute later, and the task typed after that was told a
         working session would take it at its next step. There was no next step.
 
-        Returns the projects that just went out of reach, one entry each.
+        Reported, not parked. Parking is the verdict that the window has been
+        abandoned, which is what lets an agent be started for the project, and
+        a session that stopped typing a minute ago has abandoned nothing — the
+        first version of this parked them and a message meant for the session
+        in the editor started a second agent in the same directory instead.
+
+        Returns the projects that are out of reach, one entry each.
         """
-        gone = {}
+        idle = {}
         with self.lock:
             waited = {w.session_id for w in self.waiters.values()}
             for sid, session in self.sessions.items():
                 if (self.session_alive(session) and not session.get("parked")
                         and not session.get("turn_started") and sid not in waited):
-                    session["parked"] = True
-                    gone.setdefault(session.get("project"),
+                    idle.setdefault(session.get("project"),
                                     session.get("name") or "")
-        return list(gone.items())
+        return list(idle.items())
 
     def park(self, session_id):
         """The session stopped listening to the chat. Reversed by its next
@@ -1798,7 +1803,7 @@ class Daemon:
             # Handing control over does not reach back into a turn that has
             # already ended. Say which sessions those are, at the one moment
             # the answer is useful.
-            for key, name in self.park_idle():
+            for key, name in self.idle_sessions():
                 if key:
                     self.send(key, name, t("away.idle"), silent=True)
         self.refresh_status()
