@@ -1624,7 +1624,8 @@ class Daemon:
         elif cmd in ("/away", "/here"):
             self.set_away(cmd == "/away")
         elif cmd == "/status":
-            self.bot.send_message(chat_id, self.status_text(), thread_id=thread)
+            self.bot.send_message(chat_id, self.status_text(), thread_id=thread,
+                                  markup=self.mode_markup())
         elif cmd == "/projects":
             self.show_projects(chat_id, thread)
         elif cmd == "/release":
@@ -1958,13 +1959,22 @@ class Daemon:
             waiter.resolve({"released": True})
         return len(waiters)
 
-    def refresh_status(self):
-        if not self.linked():
-            return
-        markup = {"inline_keyboard": [[{
+    def mode_markup(self):
+        """The one button that hands control over and takes it back.
+
+        It lives on the pinned status message, which sits in the group itself
+        rather than in any topic — easy to lose behind a dozen threads. /status
+        answers with it too, so it is reachable from wherever you are typing.
+        """
+        return {"inline_keyboard": [[{
             "text": t("pin.here") if self.away else t("pin.away"),
             "callback_data": "mode",
         }]]}
+
+    def refresh_status(self):
+        if not self.linked():
+            return
+        markup = self.mode_markup()
         text = self.status_text()
         mid = self.state.get("status_message_id")
         try:
