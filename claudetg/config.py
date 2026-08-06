@@ -36,6 +36,13 @@ DEFAULTS = {
     # first touch of keyboard or mouse ends this immediately, so a turn that
     # ends while you are working is not held at all.
     "stop_grace": {"enabled": True, "seconds": 90},
+    # A topic per chat rather than per project. Off by default: one topic per
+    # project is what most people want, and the first attempt at this was
+    # taken back out because it numbered threads by slot and handed the number
+    # back when the window closed — reopening the same chat then landed in a
+    # different thread. The number belongs to the session id now and is never
+    # reused, so a chat continued in the editor continues in its own topic.
+    "session_topics": {"enabled": False},
     # Absolute project paths with custom names / extra_paths. With
     # auto_discover on these are optional overrides, not a whitelist.
     "projects": {},

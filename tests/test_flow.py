@@ -43,10 +43,16 @@ class FakeBot:
         self.edits = []
         self.callbacks = []
         self.next_id = 1000
+        self.topics = []
 
     def create_topic(self, chat_id, name):
         self.callbacks.append(("create_topic", chat_id, name))
-        return {"message_thread_id": TOPIC}
+        # The first topic is the one the rest of the suite writes to; further
+        # ones get ids of their own, or a test about several threads would be
+        # comparing one number with itself.
+        self.topics.append(name)
+        return {"message_thread_id": TOPIC if len(self.topics) == 1
+                else TOPIC + len(self.topics)}
 
     def send_message(self, chat_id, text, thread_id=None, markup=None,
                      html=True, silent=False):
@@ -228,6 +234,41 @@ def test_task_reaches_a_turn_already_running():
     assert any("Передал" in m["text"] or "Handed" in m["text"]
                for m in d.bot.sent), d.bot.sent
     print("PASS a task typed mid-turn reaches the running session")
+
+
+def test_a_chat_continued_comes_back_to_its_own_topic():
+    """The failure that took this feature out the first time.
+
+    Close the editor, open it again on the same chat, and the thread it had
+    been talking in must be the thread it goes on talking in. The first
+    attempt numbered by slot and freed the number when the window closed, so
+    a continued conversation was handed whichever number was free.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.cfg["session_topics"] = {"enabled": True}
+
+    first = d.topic_for(key, "TGbotClaude", "sess-a")
+    second = d.topic_for(key, "TGbotClaude", "sess-b")
+    assert first != second, "two chats, two topics"
+    assert d.topic_number(key, "sess-b") == 2, "the second chat is #2"
+
+    d.handle_event(evt("SessionEnd", session_id="sess-a"))
+    # Reopened: same id, and the number must not have gone back into the pool.
+    assert d.topic_for(key, "TGbotClaude", "sess-a") == first, "resume moved topic"
+    assert d.topic_number(key, "sess-c") == 3, "a freed number must not be reused"
+    print("PASS a continued chat keeps its topic, a new one gets a new number")
+
+
+def test_one_topic_per_project_unless_asked_otherwise():
+    """Off by default: everything lands where it always did."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    assert not d.per_session_topics(), "must stay off unless switched on"
+    assert (d.topic_for(key, "TGbotClaude", "sess-a")
+            == d.topic_for(key, "TGbotClaude", "sess-b")), "one topic per project"
+    assert not d.state.get("session_topics"), "no numbering while it is off"
+    print("PASS one topic per project while the switch is off")
 
 
 def test_a_switch_flipped_late_still_reaches_the_session():

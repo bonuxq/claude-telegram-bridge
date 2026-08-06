@@ -30,6 +30,7 @@
   "status_monitor": { "enabled": true, "interval_seconds": 600, "components": [] },
   "watchdog": { "enabled": true, "minutes": 20 },
   "stop_grace": { "enabled": true, "seconds": 90 },
+  "session_topics": { "enabled": false },
   "daily_digest": { "enabled": true, "hour": 21 },
   "stats_retention_days": 14,
 
