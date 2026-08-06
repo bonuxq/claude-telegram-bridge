@@ -502,7 +502,9 @@ def test_a_finished_turn_is_not_promised_a_next_step():
                    {"chat": {"id": -100}, "message_thread_id": TOPIC})
     assert d.queue[key] == ["Тест 1"]
     said = d.bot.sent[-1]["text"]
-    assert i18n.t("ack.queued") in said, said
+    # The session is open but between turns: it takes this when it moves, and
+    # that is not the same as a running turn taking it at its next batch.
+    assert i18n.t("ack.midstep") in said, said
     assert i18n.t("ack.handoff") not in said, "promised a step that is not coming"
     print("PASS an idle session is never promised a step it does not have")
 

@@ -1636,11 +1636,18 @@ class Daemon:
         with self.lock:
             self.queue.setdefault(key, []).append(text)
         self.persist()
-        # A turn that is running takes this at its next batch, so "queued"
-        # would read as a longer wait than it is. Anything else must not
-        # promise a step: an idle session has none until it is typed into.
-        self.ack(message, t("ack.handoff") if self.working_session(key)
-                 else t("ack.queued"))
+        # Three different waits, and calling them all a queue told you
+        # nothing about which one you were in. A running turn takes this at
+        # its next batch; a session sitting between turns takes it the moment
+        # it moves, which may be when you type at the keyboard; with nothing
+        # open at all it waits for a session to exist.
+        if self.working_session(key):
+            said = t("ack.handoff")
+        elif self.live_session(key):
+            said = t("ack.midstep")
+        else:
+            said = t("ack.queued")
+        self.ack(message, said)
 
     def answer_by_text(self, waiter, text, message):
         """Free-text reply to a question message answers that question."""
