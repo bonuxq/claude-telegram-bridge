@@ -1040,6 +1040,7 @@ class Daemon:
 
     def on_stop(self, data, key, name):
         sid = data.get("session_id")
+        began = time.time()
         text, seconds = transcript.summarize(data.get("transcript_path"))
         with self.lock:
             self.sessions.setdefault(sid, {}).update(
@@ -1076,50 +1077,71 @@ class Daemon:
             return {"decision": "block", "reason": _join_tasks(queued)}
 
         head = render.header("✅", name, seconds)
+        reported = False
         if not self.away:
-            # Not a decision yet: the switch may still be on its way.
-            self.await_switch()
-        if not self.away:
+            # Say it now rather than after the hold below, or a turn that ends
+            # while nobody is at the desk would keep its summary to itself for
+            # as long as the hold lasts.
             if self.should_log("stop"):
                 self.send(key, name, self.closing(text, head, streamed),
                           silent=True, session=sid)
             self.report_usage()
-            return {}
+            reported = True
+            self.await_switch()
+            if not self.away:
+                return {}
 
         thread = self.topic_for(key, name, sid)
-        waiter = Waiter("stop", sid, key)
-        markup = {"inline_keyboard": [
-            [{"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
-             {"text": t("btn.hold"), "callback_data": f"hold:{waiter.id}"}],
-            [{"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"}],
-        ]}
-        msgs = self.closing(text, head, streamed)
+        # The summary has already been sent when the switch arrived late; only
+        # the buttons are still owed.
+        msgs = ([t("stop.again")] if reported
+                else self.closing(text, head, streamed))
         msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
-        ids = self.send(key, name, msgs, markup=markup, thread=thread)
-        self.report_usage()
-        self.register(waiter, key, ids, thread)
+        while True:
+            waiter = Waiter("stop", sid, key)
+            markup = {"inline_keyboard": [
+                [{"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
+                 {"text": t("btn.hold"), "callback_data": f"hold:{waiter.id}"}],
+                [{"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"}],
+            ]}
+            ids = self.send(key, name, msgs, markup=markup, thread=thread)
+            if not reported:
+                self.report_usage()
+                reported = True
+            self.register(waiter, key, ids, thread)
 
-        result = waiter.wait(self.cfg["wait_seconds"])
-        self.unregister(waiter)
-        if not result:
-            self.park(sid)
-            self.send(key, name, t("stop.parked") if self.can_spawn(key)
-                      else t("stop.timeout"), silent=True, session=sid)
-            return {}
-        if result.get("released"):
-            self.send(key, name, t("stop.released"), silent=True, session=sid)
-            return {}
-        if result.get("action") == "hold":
-            # Let the turn end without saying a word to the session: it set
-            # itself something to wake it, and the wait was the only thing
-            # standing between it and its own alarm. A task typed after this
-            # is handed over on the session's next batch, not at the next end
-            # of turn, so waiting here costs nothing.
-            self.send(key, name, t("stop.hold"), silent=True, session=sid)
-            return {}
-        if result.get("action") == "end":
-            return {}
-        return {"decision": "block", "reason": result["text"]}
+            # Whatever the hold already spent comes out of the wait: both
+            # happen inside one hook, and together they must stay under the
+            # timeout Claude Code gives it.
+            left = self.cfg["wait_seconds"] - (time.time() - began)
+            result = waiter.wait(max(1, left))
+            self.unregister(waiter)
+            if not result:
+                self.park(sid)
+                self.send(key, name, t("stop.parked") if self.can_spawn(key)
+                          else t("stop.timeout"), silent=True, session=sid)
+                return {}
+            if result.get("released"):
+                # Back at the keyboard, so the hook goes back to the editor —
+                # but stepping away again a moment later used to find nothing
+                # left to hold. Hold once more while the desk stays quiet.
+                self.send(key, name, t("stop.released"), silent=True, session=sid)
+                self.await_switch()
+                if self.away:
+                    msgs = [t("stop.again") + f"\n\n<i>{t('stop.await')}</i>"]
+                    continue
+                return {}
+            if result.get("action") == "hold":
+                # Let the turn end without saying a word to the session: it set
+                # itself something to wake it, and the wait was the only thing
+                # standing between it and its own alarm. A task typed after this
+                # is handed over on the session's next batch, not at the next end
+                # of turn, so waiting here costs nothing.
+                self.send(key, name, t("stop.hold"), silent=True, session=sid)
+                return {}
+            if result.get("action") == "end":
+                return {}
+            return {"decision": "block", "reason": result["text"]}
 
     def closing(self, text, head, streamed=False):
         """Turn ending.
@@ -1287,6 +1309,17 @@ class Daemon:
                     # the very turn the press was meant to keep.
                     time.sleep(0.25)
                     continue
+                # Any touch may still be the hand on the switch — the widget
+                # sits on this screen too, and a press there is a click like
+                # any other. Wait out the round trip before deciding it was
+                # somebody sitting back down to work.
+                settle = time.time() + self.SWITCH_LINGER
+                while time.time() < settle:
+                    if self.away:
+                        log(f"turn held {int(time.time() - started)}s"
+                            " and caught the switch")
+                        return
+                    time.sleep(0.1)
                 return          # somebody is at the desk: do not hold them up
             time.sleep(0.25)
 
@@ -2076,6 +2109,10 @@ class Daemon:
 
     # Between full passes over every topic, whatever asks for them.
     SWITCH_MIN_GAP = 15
+    # How long a touch waits to turn out to have been the switch being
+    # pressed. Paid at the end of every turn worked through at the desk, so
+    # it buys only the round trip of a click on this screen and no more.
+    SWITCH_LINGER = 2
 
     def forget_topic(self, tid):
         """Drop a topic that no longer exists, so a new one is made instead.

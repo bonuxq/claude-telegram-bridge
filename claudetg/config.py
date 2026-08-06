@@ -35,7 +35,7 @@ DEFAULTS = {
     # door back into it, and "away" a minute later found the door gone. The
     # first touch of keyboard or mouse ends this immediately, so a turn that
     # ends while you are working is not held at all.
-    "stop_grace": {"enabled": True, "seconds": 90},
+    "stop_grace": {"enabled": True, "seconds": 600},
     # A topic per chat rather than per project. Off by default: one topic per
     # project is what most people want, and the first attempt at this was
     # taken back out because it numbered threads by slot and handed the number

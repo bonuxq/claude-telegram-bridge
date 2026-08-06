@@ -438,7 +438,9 @@ def test_a_turn_that_ends_at_the_desk_is_not_held():
     try:
         start = time.time()
         assert d.handle_event(evt("Stop")) == {}
-        assert time.time() - start < 3, "a working desk must not be held up"
+        # Not instant: a touch waits out the round trip of a switch pressed
+        # on this screen. It must be that and not the whole window.
+        assert time.time() - start < 6, "a working desk must not be held up"
     finally:
         daemon_module.input_idle_seconds = untouched
         daemon_module.foreground_app = was_front
