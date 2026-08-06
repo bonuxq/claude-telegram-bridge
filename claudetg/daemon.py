@@ -409,18 +409,22 @@ class Daemon:
         now = time.time()
         stalled = []
         with self.lock:
-            for session in self.sessions.values():
+            for sid, session in self.sessions.items():
                 started = session.get("turn_started")
                 if not started or session.get("stall_alerted"):
                     continue
                 if now - started >= limit:
                     session["stall_alerted"] = True
                     stalled.append((session.get("project"), session.get("name"),
-                                    now - started))
-        for key, name, elapsed in stalled:
+                                    now - started, sid))
+        for key, name, elapsed, sid in stalled:
+            # Into the thread of the session that is stuck, not the project's:
+            # "this one has not moved in twenty minutes" is only useful next
+            # to the conversation it is about.
             self.send(key, name or "?",
                       t("stall", name=html.escape(name or "?"),
-                        duration=render.duration(elapsed)), silent=False)
+                        duration=render.duration(elapsed)), silent=False,
+                      session=sid)
 
     def digest_forever(self, hour):
         while True:
@@ -1304,7 +1308,8 @@ class Daemon:
             self.queue.setdefault(key, []).append(task)
         self.persist()
         self.send(key, self.project_name(key),
-                  t("queue.rescued", task=html.escape(task[:300])), silent=False)
+                  t("queue.rescued", task=html.escape(task[:300])), silent=False,
+                  session=session_id)
 
     def forget_stale_sessions(self):
         """Drop sessions nothing has been heard from in hours."""
