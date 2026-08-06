@@ -29,6 +29,13 @@ DEFAULTS = {
     # hook answers of its own accord instead of being killed mid-wait.
     "wait_seconds": 14100,
     "hook_timeout_seconds": 14400,
+    # How long a turn that ends at the keyboard keeps its hook, in case the
+    # switch is about to be flipped. Letting it go at once is what made a
+    # session unreachable the moment its turn was over: the hook is the only
+    # door back into it, and "away" a minute later found the door gone. The
+    # first touch of keyboard or mouse ends this immediately, so a turn that
+    # ends while you are working is not held at all.
+    "stop_grace": {"enabled": True, "seconds": 90},
     # Absolute project paths with custom names / extra_paths. With
     # auto_discover on these are optional overrides, not a whitelist.
     "projects": {},

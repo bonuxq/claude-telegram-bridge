@@ -72,6 +72,10 @@ class FakeBot:
 def make_daemon(tmp_state, away):
     cfg = dict(cfgmod.DEFAULTS)
     cfg.update({"bot_token": "x", "chat_id": -100, "wait_seconds": 5,
+                # Off unless a test is about it: otherwise every at-the-PC
+                # stop would wait on whether somebody is touching the mouse
+                # of the machine running the suite.
+                "stop_grace": {"enabled": False},
                 # Off by default so tests never depend on a real usage.json
                 # lying around on disk.
                 "usage_report": {"enabled": False},
@@ -224,6 +228,47 @@ def test_task_reaches_a_turn_already_running():
     assert any("Передал" in m["text"] or "Handed" in m["text"]
                for m in d.bot.sent), d.bot.sent
     print("PASS a task typed mid-turn reaches the running session")
+
+
+def test_a_switch_flipped_late_still_reaches_the_session():
+    """The turn is over and the switch comes after it. Same session, no agent."""
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 10}
+    d.refresh_status = lambda: None
+    untouched = daemon_module.input_idle_seconds
+    daemon_module.input_idle_seconds = lambda: 999.0    # nobody at the desk
+    try:
+        box, thread = run_async(d, evt("Stop"))
+        time.sleep(0.5)                                 # the turn is being held
+        assert not box, "the hook must still be there when the switch arrives"
+        d.set_away(True)
+        assert wait_for(lambda: d.waiters), "the held turn must become a wait"
+        wid = next(iter(d.waiters))
+        d.on_callback({"id": "cb", "data": f"go:{wid}"})
+        thread.join(3)
+        assert box["result"]["decision"] == "block", box
+    finally:
+        daemon_module.input_idle_seconds = untouched
+    print("PASS a switch flipped after the turn still lands in that session")
+
+
+def test_a_turn_that_ends_at_the_desk_is_not_held():
+    """Working at the keyboard must not notice this exists."""
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 30}
+    untouched = daemon_module.input_idle_seconds
+    # Touched a moment ago, and the turn ran for a while before that: the
+    # touch is newer than the wait, which is what "still here" means.
+    daemon_module.input_idle_seconds = lambda: 0.0
+    try:
+        start = time.time()
+        assert d.handle_event(evt("Stop")) == {}
+        assert time.time() - start < 3, "a working desk must not be held up"
+    finally:
+        daemon_module.input_idle_seconds = untouched
+    print("PASS a turn ending at a busy desk is let go at once")
 
 
 def test_a_finished_turn_is_not_promised_a_next_step():

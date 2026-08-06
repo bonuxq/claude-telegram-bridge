@@ -43,6 +43,28 @@ def log(*parts):
             pass
 
 
+def input_idle_seconds():
+    """Seconds since the last key press or mouse movement, system-wide.
+
+    None when the question cannot be asked — off Windows, or if the call
+    fails — so a caller can tell "nobody has touched it" apart from "no idea",
+    and never mistake the second for the first.
+    """
+    try:
+        import ctypes
+
+        class LastInput(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LastInput()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        return max(0.0, (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 class Waiter:
     """A hook blocked on the user. Resolved by a Telegram update or a timeout."""
 
@@ -929,6 +951,9 @@ class Daemon:
 
         head = render.header("✅", name, seconds)
         if not self.away:
+            # Not a decision yet: the switch may still be on its way.
+            self.await_switch()
+        if not self.away:
             if self.should_log("stop"):
                 self.send(key, name, self.closing(text, head, streamed),
                           silent=True)
@@ -1092,6 +1117,45 @@ class Daemon:
             return any(self.session_alive(s) and not s.get("parked")
                        and s.get("project") == key
                        for s in self.sessions.values())
+
+    def await_switch(self):
+        """Hold a finished turn for a moment, in case the switch is coming.
+
+        A turn that ends at the keyboard let its hook go at once, and with the
+        hook went the only way back into that session: flipping to away a
+        minute later reached a session nothing fires in any more, and a task
+        typed from the phone could do nothing but wait for the next thing
+        typed at the desk. Holding keeps that door open while the desk stays
+        untouched.
+
+        What ends the hold is a touch that happens *after* the turn did, not a
+        recent one: the key press that submitted the prompt of a short turn is
+        seconds old when it ends, and treating that as "still here" would shut
+        the door in exactly the case this exists for.
+        """
+        cfg = self.cfg.get("stop_grace") or {}
+        if not cfg.get("enabled", True):
+            return
+        grace = int(cfg.get("seconds") or 0)
+        if grace <= 0:
+            return
+        if input_idle_seconds() is None:
+            # No way to notice somebody sitting down again, and holding a turn
+            # that only the switch could release would strand every one of
+            # them for the full window. Without the signal, do not hold.
+            return
+        started = time.time()
+        while True:
+            waited = time.time() - started
+            if waited >= grace:
+                return
+            if self.away:
+                log(f"turn held {int(waited)}s and caught the switch")
+                return
+            idle = input_idle_seconds()
+            if idle is not None and idle < waited:
+                return          # somebody is at the desk: do not hold them up
+            time.sleep(0.25)
 
     def working_session(self, key):
         """Is a turn of this project running right now?
@@ -1610,6 +1674,7 @@ class Daemon:
         "usage_poll.enabled",
         "status_monitor.enabled",
         "watchdog.enabled",
+        "stop_grace.enabled",
         "daily_digest.enabled",
         "git_summary",
         "log_when_present.stop",
