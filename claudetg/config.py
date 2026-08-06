@@ -29,6 +29,30 @@ DEFAULTS = {
     # hook answers of its own accord instead of being killed mid-wait.
     "wait_seconds": 14100,
     "hook_timeout_seconds": 14400,
+    # How long a turn that ends at the keyboard keeps its hook, in case the
+    # switch is about to be flipped. Letting it go at once is what made a
+    # session unreachable the moment its turn was over: the hook is the only
+    # door back into it, and "away" a minute later found the door gone.
+    #
+    # An hour, because the real condition is not the clock but the desk: the
+    # first touch of keyboard or mouse ends this at once, so a turn that ends
+    # while you are working is not held at all, and one that ends after you
+    # have walked away is held for as long as nobody comes back. The summary
+    # is sent before the hold rather than after, so nothing waits on it.
+    "stop_grace": {"enabled": True, "seconds": 3600},
+    # A topic per chat rather than per project. Off by default: one topic per
+    # project is what most people want, and the first attempt at this was
+    # taken back out because it numbered threads by slot and handed the number
+    # back when the window closed — reopening the same chat then landed in a
+    # different thread. The number belongs to the session id now and is never
+    # reused, so a chat continued in the editor continues in its own topic.
+    "session_topics": {"enabled": False},
+    # While away, let the session set itself an alarm instead of going quiet.
+    # Nothing outside a session can start a turn in it, so a wait that runs out
+    # leaves it unreachable until somebody types at the keyboard; a session
+    # that wakes itself is reachable again every time it does. Off by default:
+    # it costs a turn per interval, small but not nothing.
+    "wake_alarm": {"enabled": False, "minutes": 15},
     # Absolute project paths with custom names / extra_paths. With
     # auto_discover on these are optional overrides, not a whitelist.
     "projects": {},

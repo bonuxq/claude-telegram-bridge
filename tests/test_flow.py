@@ -43,10 +43,16 @@ class FakeBot:
         self.edits = []
         self.callbacks = []
         self.next_id = 1000
+        self.topics = []
 
     def create_topic(self, chat_id, name):
         self.callbacks.append(("create_topic", chat_id, name))
-        return {"message_thread_id": TOPIC}
+        # The first topic is the one the rest of the suite writes to; further
+        # ones get ids of their own, or a test about several threads would be
+        # comparing one number with itself.
+        self.topics.append(name)
+        return {"message_thread_id": TOPIC if len(self.topics) == 1
+                else TOPIC + len(self.topics)}
 
     def send_message(self, chat_id, text, thread_id=None, markup=None,
                      html=True, silent=False):
@@ -72,6 +78,10 @@ class FakeBot:
 def make_daemon(tmp_state, away):
     cfg = dict(cfgmod.DEFAULTS)
     cfg.update({"bot_token": "x", "chat_id": -100, "wait_seconds": 5,
+                # Off unless a test is about it: otherwise every at-the-PC
+                # stop would wait on whether somebody is touching the mouse
+                # of the machine running the suite.
+                "stop_grace": {"enabled": False},
                 # Off by default so tests never depend on a real usage.json
                 # lying around on disk.
                 "usage_report": {"enabled": False},
@@ -201,6 +211,364 @@ def test_queue_when_nobody_listens():
     assert out["decision"] == "block" and "собери релиз" in out["reason"], out
     assert not d.queue.get(cfgmod.normalize(PROJECT)), "queue must drain"
     print("PASS queued task is delivered on the next Stop")
+
+
+def test_task_reaches_a_turn_already_running():
+    """The whole point: a correction must not wait for the work to finish."""
+    d = make_daemon("s.json", away=True)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.sessions["s1"] = {"project": key, "name": "TGbotClaude", "alive": True,
+                        "last_seen": time.time(), "parked": False}
+
+    d.deliver_text("стой, не трогай config.json", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert d.queue[key] == ["стой, не трогай config.json"]
+    assert d.bot.callbacks == [] and d.bot.sent, "the message must be acknowledged"
+
+    out = d.handle_event(evt("PostToolBatch"))
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolBatch", out
+    assert "не трогай config.json" in context, context
+    assert not d.queue.get(key), "handed over, so it must not arrive twice"
+    assert any("Передал" in m["text"] or "Handed" in m["text"]
+               for m in d.bot.sent), d.bot.sent
+    print("PASS a task typed mid-turn reaches the running session")
+
+
+def test_a_deleted_topic_is_made_again():
+    """The numbered threads of an older version are what people clear out.
+
+    Their ids stay in state, so with a topic per chat the next chat to be
+    given that number would post into nothing at all.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.linked = lambda: True
+    d.state["topics"][key] = 999          # a topic that no longer exists
+
+    def gone(chat_id, text, thread_id=None, markup=None, html=True, silent=False):
+        if thread_id == 999:
+            raise daemon_module.TelegramError("sendMessage", 400,
+                                              "Bad Request: message thread not found")
+        return FakeBot.send_message(d.bot, chat_id, text, thread_id=thread_id,
+                                    markup=markup, html=html, silent=silent)
+
+    d.bot.send_message = gone
+    ids = d.send(key, "TGbotClaude", "важное сообщение")
+    assert ids, "the message must survive the topic being deleted"
+    assert d.state["topics"][key] != 999, "the dead topic must not be kept"
+    print("PASS a message outlives the topic it was aimed at")
+
+
+def test_a_waiting_session_is_told_to_wake_itself():
+    """Nothing outside a session can start a turn in it.
+
+    So a wait that runs out leaves it out of reach until somebody types at the
+    keyboard. Told to sleep in the background, it is woken when that finishes,
+    and the turn it wakes into is a turn the chat can reach.
+    """
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["wait_seconds"] = 300
+    d.cfg["wake_alarm"] = {"enabled": True, "minutes": 15}
+    d.alarm_seconds = lambda: 2      # the real floor is a minute; this is a test
+
+    start = time.time()
+    out = d.handle_event(evt("Stop"))
+    waited = time.time() - start
+    assert waited < 30, "the wait must be cut to the alarm, not run its course"
+    assert out.get("decision") == "block", out
+    assert "sleep 2" in out["reason"], out["reason"]
+    assert not d.sessions.get("s1", {}).get("parked"), "it is coming back, not parked"
+    assert any("⏰" in m["text"] for m in d.bot.sent), d.bot.sent
+    print("PASS a session with nobody answering sets itself an alarm")
+
+
+def test_the_panel_button_switches_instead_of_queueing():
+    """Its label arrives as an ordinary message and must not become a task."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.refresh_status = lambda: None
+    deleted = []
+    d.bot.delete_message = lambda chat, mid: deleted.append(mid)
+
+    d.on_update({"message": {"message_id": 77, "chat": {"id": -100},
+                             "message_thread_id": TOPIC,
+                             "text": i18n.t("panel.mode")}})
+    assert d.away, "the panel button must hand control over"
+    assert not d.queue.get(key), "it must not be read as a task"
+    assert deleted == [77], "the press is cleared from the topic"
+
+    d.on_update({"message": {"message_id": 78, "chat": {"id": -100},
+                             "message_thread_id": TOPIC, "text": "почини это"}})
+    assert d.queue.get(key) == ["почини это"], "ordinary text still queues"
+    print("PASS the panel button switches the mode and stays out of the queue")
+
+
+def test_every_topic_carries_the_switch():
+    """Handing control over must not mean going to look for the button."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.linked = lambda: True
+
+    topic = d.topic_for(key, "TGbotClaude")
+    pinned = d.state["status_msgs"]
+    assert str(topic) in pinned, pinned
+    posted = [m for m in d.bot.sent if m.get("markup")]
+    assert posted and posted[-1]["thread"] == topic, "the switch goes in the topic"
+    assert any(b["callback_data"] == "mode"
+               for row in posted[-1]["markup"]["inline_keyboard"] for b in row)
+
+    # Checking again with nothing changed must not ask Telegram anything:
+    # this runs on a timer, and a question a minute is a question too many.
+    before = len(d.bot.sent), len(d.bot.edits)
+    d._switches_at = 0
+    d.refresh_topic_switches()
+    assert (len(d.bot.sent), len(d.bot.edits)) == before, "asked for nothing"
+
+    # Flipping the mode edits what is there instead of posting it again.
+    d.state["away"] = True
+    d._switches_at = 0
+    d.refresh_topic_switches()
+    assert len(d.bot.sent) == before[0], "a refresh must not repost the switch"
+    assert d.bot.edits and d.bot.edits[-1]["id"] == pinned[str(topic)]
+    assert i18n.t("mode.status.away") in d.bot.edits[-1]["text"], d.bot.edits[-1]
+    print("PASS the switch is written into each topic and kept honest")
+
+
+def test_a_shared_directory_belongs_to_nobody():
+    """Four projects work through the same game client. Each keeps its own.
+
+    Binding the shared directory to one project files everybody else's
+    sessions under that one, and no directory can answer this question: the
+    session's own transcript can, because its first entry is where it was
+    opened.
+    """
+    d = make_daemon("s.json", away=False)
+    client = "E:/563 client/system"
+    roots = {f"e:/project{n}": f"Project {n}" for n in range(1, 5)}
+    d.cfg["projects"] = {cfgmod.normalize(r): {"name": n, "extra_paths": [client]}
+                         for r, n in roots.items()}
+
+    for root, name in roots.items():
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"home-{name.replace(' ', '')}.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"cwd": root, "type": "user"}) + "\n")
+        try:
+            # Every one of them is standing in the shared client right now.
+            resolved = d.resolve_project(
+                {"hook_event_name": "PostToolBatch", "cwd": client,
+                 "session_id": f"s-{name}", "transcript_path": path})
+        finally:
+            os.remove(path)
+        assert resolved[0] == cfgmod.normalize(root), f"{name} -> {resolved}"
+    print("PASS sessions sharing a directory keep their own projects")
+
+
+def test_a_session_keeps_its_project_when_it_wanders():
+    """Seen live: a converter working through a game client changed topics.
+
+    The client directory is bound to another project by extra_paths, so every
+    event fired while the session stood there was filed under that project —
+    one line in one topic, the next in another, for as long as the work in
+    that directory lasted.
+    """
+    d = make_daemon("s.json", away=False)
+    convert = cfgmod.normalize("e:/convert_lic30-lic40")
+    reverse = cfgmod.normalize("c:/users/me/reversel2")
+    client = "E:/563 client/system"
+    d.cfg["projects"] = {
+        convert: {"name": "Convert"},
+        reverse: {"name": "ReverseL2", "extra_paths": [client]},
+    }
+
+    d.handle_event(evt("SessionStart", cwd="e:/convert_lic30-lic40",
+                       session_id="conv"))
+    assert d.sessions["conv"]["project"] == convert
+
+    wandered = d.resolve_project(evt("PostToolBatch", cwd=client,
+                                     session_id="conv"))
+    assert wandered[0] == convert, f"the converter moved to {wandered}"
+
+    # A session that genuinely opens there still belongs to that project.
+    fresh = d.resolve_project(evt("SessionStart", cwd=client, session_id="new"))
+    assert fresh[0] == reverse, fresh
+    print("PASS a session keeps its project wherever its cwd goes")
+
+
+def test_a_chat_continued_comes_back_to_its_own_topic():
+    """The failure that took this feature out the first time.
+
+    Close the editor, open it again on the same chat, and the thread it had
+    been talking in must be the thread it goes on talking in. The first
+    attempt numbered by slot and freed the number when the window closed, so
+    a continued conversation was handed whichever number was free.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.cfg["session_topics"] = {"enabled": True}
+
+    first = d.topic_for(key, "TGbotClaude", "sess-a")
+    second = d.topic_for(key, "TGbotClaude", "sess-b")
+    assert first != second, "two chats, two topics"
+    assert d.topic_number(key, "sess-b") == 2, "the second chat is #2"
+
+    d.handle_event(evt("SessionEnd", session_id="sess-a"))
+    # Reopened: same id, and the number must not have gone back into the pool.
+    assert d.topic_for(key, "TGbotClaude", "sess-a") == first, "resume moved topic"
+    assert d.topic_number(key, "sess-c") == 3, "a freed number must not be reused"
+    print("PASS a continued chat keeps its topic, a new one gets a new number")
+
+
+def test_one_topic_per_project_unless_asked_otherwise():
+    """Off by default: everything lands where it always did."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    assert not d.per_session_topics(), "must stay off unless switched on"
+    assert (d.topic_for(key, "TGbotClaude", "sess-a")
+            == d.topic_for(key, "TGbotClaude", "sess-b")), "one topic per project"
+    assert not d.state.get("session_topics"), "no numbering while it is off"
+    print("PASS one topic per project while the switch is off")
+
+
+def test_a_switch_flipped_late_still_reaches_the_session():
+    """The turn is over and the switch comes after it. Same session, no agent."""
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 10}
+    d.refresh_status = lambda: None
+    untouched = daemon_module.input_idle_seconds
+    daemon_module.input_idle_seconds = lambda: 999.0    # nobody at the desk
+    try:
+        box, thread = run_async(d, evt("Stop"))
+        time.sleep(0.5)                                 # the turn is being held
+        assert not box, "the hook must still be there when the switch arrives"
+        d.set_away(True)
+        assert wait_for(lambda: d.waiters), "the held turn must become a wait"
+        wid = next(iter(d.waiters))
+        d.on_callback({"id": "cb", "data": f"go:{wid}"})
+        thread.join(3)
+        assert box["result"]["decision"] == "block", box
+    finally:
+        daemon_module.input_idle_seconds = untouched
+    print("PASS a switch flipped after the turn still lands in that session")
+
+
+def test_a_turn_that_ends_at_the_desk_is_not_held():
+    """Working at the keyboard must not notice this exists."""
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 30}
+    untouched = daemon_module.input_idle_seconds
+    was_front = daemon_module.foreground_app
+    # Touched a moment ago, and the turn ran for a while before that: the
+    # touch is newer than the wait, which is what "still here" means.
+    daemon_module.input_idle_seconds = lambda: 0.0
+    daemon_module.foreground_app = lambda: "code.exe"
+    try:
+        start = time.time()
+        assert d.handle_event(evt("Stop")) == {}
+        # Not instant: a touch waits out the round trip of a switch pressed
+        # on this screen. It must be that and not the whole window.
+        assert time.time() - start < 6, "a working desk must not be held up"
+    finally:
+        daemon_module.input_idle_seconds = untouched
+        daemon_module.foreground_app = was_front
+    print("PASS a turn ending at a busy desk is let go at once")
+
+
+def test_reaching_for_the_switch_does_not_end_the_hold():
+    """The click that presses the button is input like any other.
+
+    It reaches this machine a moment before the button reaches Telegram and
+    comes back, so counting it as "back at the desk" let go of the very turn
+    the press was meant to keep. Pressed from a phone it worked; pressed in
+    Telegram on the same screen it never could.
+    """
+    d = make_daemon("s.json", away=False)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["stop_grace"] = {"enabled": True, "seconds": 10}
+    d.refresh_status = lambda: None
+    untouched, was_front = (daemon_module.input_idle_seconds,
+                            daemon_module.foreground_app)
+    daemon_module.input_idle_seconds = lambda: 0.0        # the mouse is moving
+    daemon_module.foreground_app = lambda: "telegram.exe"  # ...in Telegram
+    try:
+        box, thread = run_async(d, evt("Stop"))
+        time.sleep(0.8)
+        assert not box, "a click in Telegram must not let the turn go"
+        d.set_away(True)
+        assert wait_for(lambda: d.waiters), "the switch must still find it"
+        d.on_callback({"id": "cb", "data": f"end:{next(iter(d.waiters))}"})
+        thread.join(3)
+    finally:
+        daemon_module.input_idle_seconds = untouched
+        daemon_module.foreground_app = was_front
+    print("PASS reaching for the switch does not end the hold")
+
+
+def test_a_finished_turn_is_not_promised_a_next_step():
+    """The turn ended at the keyboard, then control came over. Nothing runs.
+
+    Reproduces the live sequence: Stop answered at 12:04:59 with nobody away,
+    away went on after it, and the task typed next was told a working session
+    would take it at its next step.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.refresh_status = lambda: None
+    d.handle_event(evt("UserPromptSubmit"))
+    assert d.working_session(key), "a turn is running"
+    d.handle_event(evt("Stop"))          # ends at the PC: no waiter, no block
+    assert not d.working_session(key), "the turn is over"
+
+    d.set_away(True)
+    assert any("⏸" in m["text"] for m in d.bot.sent), d.bot.sent
+    # Out of reach is not abandoned. Parking it here is what sent a message
+    # meant for the window in the editor to a second agent in its directory.
+    assert not d.sessions["s1"].get("parked"), "a minute of quiet is not a goodbye"
+    assert d.live_session(key), "an open editor must keep an agent away"
+
+    d.deliver_text("Тест 1", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert d.queue[key] == ["Тест 1"]
+    said = d.bot.sent[-1]["text"]
+    # The session is open but between turns: it takes this when it moves, and
+    # that is not the same as a running turn taking it at its next batch.
+    assert i18n.t("ack.midstep") in said, said
+    assert i18n.t("ack.handoff") not in said, "promised a step that is not coming"
+    print("PASS an idle session is never promised a step it does not have")
+
+
+def test_idle_batch_says_nothing():
+    """This runs on every batch of every turn; empty must stay free."""
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    assert d.handle_event(evt("PostToolBatch")) == {}
+    assert d.bot.sent == [], "an empty queue must not produce chatter"
+    print("PASS an empty queue costs the turn nothing")
+
+
+def test_hold_releases_the_wait_in_silence():
+    """Waiting is not answering: the session must hear nothing at all."""
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    box, thread = run_async(d, evt("Stop"))
+    assert wait_for(lambda: d.waiters), "the away stop must offer its buttons"
+    wid = next(iter(d.waiters))
+
+    markup = next(m["markup"] for m in reversed(d.bot.sent) if m.get("markup"))
+    buttons = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert f"hold:{wid}" in buttons, buttons
+
+    d.on_callback({"id": "cb", "data": f"hold:{wid}"})
+    thread.join(3)
+    assert box["result"] == {}, "nothing may be handed back to the session"
+    print("PASS holding releases the hook without a word to the session")
 
 
 def test_todos_edit_one_message():

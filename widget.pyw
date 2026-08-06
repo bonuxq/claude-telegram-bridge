@@ -1029,6 +1029,13 @@ class Widget:
         self.fable_shown = tk.IntVar(value=int(saved.get("fable_shown", 0)))
         self.limits_shown = tk.IntVar(value=int(saved.get("limits_shown", 1)))
         self.last_usage = None
+        # -- alarm, on a line of its own ----------------------------------
+        # It used to be the last word of the session list, which is cut at 48
+        # characters — so the alarm was the part that got cut. Packed only
+        # while one is set, above the limits, where nothing else moves.
+        self.alarm_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
+                                    fg=SECONDARY, anchor="w", padx=14)
+
         limits_bar = tk.Frame(self.root, bg=SURFACE)
         limits_bar.pack(fill="x", padx=14, pady=(6, 0))
         self.limits_tab = ShadowText(limits_bar, small)
@@ -1127,6 +1134,7 @@ class Widget:
             ("cmd", t("menu.setup"), self.open_setup),
             ("cmd", t("menu.projects"), self.open_projects),
             ("cmd", t("menu.settings"), self.open_settings),
+            ("cmd", t("menu.alarm"), self.open_alarm),
             ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
             ("sub", t("menu.clickthrough"), through),
@@ -1661,6 +1669,53 @@ class Widget:
         win.geometry("")        # shrink to whatever the steps needed
         entry.focus_set()
 
+    def open_alarm(self):
+        """How long a waiting session sleeps before checking back.
+
+        A number rather than a switch, so it gets a box of its own instead of
+        a row among the things that are merely on or off. Zero turns it off,
+        which is the same answer as the switch in Features.
+        """
+        snapshot = self.request("/mode") or {}
+        alarm = snapshot.get("alarm") or {}
+        win = self.make_card(t("alarm.title"), width=420)
+        tk.Label(win, text=t("alarm.hint"), font=self.small, bg=SURFACE,
+                 fg=MUTED, anchor="w", padx=14, justify="left",
+                 wraplength=380).pack(fill="x", pady=(0, 8))
+
+        row = tk.Frame(win, bg=SURFACE)
+        row.pack(fill="x", padx=14)
+        tk.Label(row, text=t("alarm.minutes"), font=self.small, bg=SURFACE,
+                 fg=SECONDARY, anchor="w").pack(side="left")
+        entry = tk.Entry(row, font=self.small, bg=RAISED, fg=PRIMARY,
+                         insertbackground=PRIMARY, relief="flat", width=6,
+                         highlightthickness=1, highlightbackground=EDGE)
+        entry.pack(side="left", padx=(8, 0), ipady=3)
+        entry.insert(0, str(alarm.get("minutes", 15))
+                     if alarm.get("enabled") else "0")
+        note = tk.Label(win, font=self.small, bg=SURFACE, fg=MUTED, anchor="w",
+                        padx=14, justify="left", wraplength=380)
+        note.pack(fill="x", pady=(6, 0))
+
+        def apply():
+            try:
+                minutes = max(0, min(240, int(entry.get().strip() or 0)))
+            except ValueError:
+                note.configure(text=t("alarm.bad"), fg=WARNING)
+                return
+            self.request("/settings", {"settings": {"wake_alarm.minutes": minutes}})
+            note.configure(text=t("alarm.off") if minutes == 0
+                           else t("alarm.on", minutes=minutes), fg=GOOD)
+
+        button = tk.Label(win, text=t("alarm.apply"), font=self.small, bg=RAISED,
+                          fg=PRIMARY, cursor="hand2", padx=12, pady=5)
+        button.pack(anchor="w", padx=14, pady=(10, 6))
+        button.bind("<Button-1>", lambda e: apply())
+        button.bind("<Enter>", lambda e: button.configure(bg=RAISED_HI))
+        button.bind("<Leave>", lambda e: button.configure(bg=RAISED))
+        entry.bind("<Return>", lambda e: apply())
+        win.geometry("")        # shrink to fit
+
     def open_settings(self):
         snapshot = self.request("/settings")
         if snapshot is None:
@@ -1702,6 +1757,7 @@ class Widget:
                 kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting)))
         if queued:
             info.append(t("widget.queued", n=queued))
+        self.show_alarm(snapshot.get("alarm") or {}, away)
         # One line on the card; the full picture lives in the hover tip,
         # which drops the "Sessions:" prefix — it is plainly the session list.
         line = " · ".join(info)
@@ -1857,6 +1913,29 @@ class Widget:
         self.limits_shown.set(0 if self.limits_shown.get() else 1)
         self.layout_limits()
         self.save_pos()
+
+    def show_alarm(self, alarm, away):
+        """Its own row while an alarm is set, and no row at all when none is.
+
+        It only ever runs while you are away — at the PC a session that stops
+        is a session you can simply type into — so the row says which of the
+        two it is rather than a number that is not counting.
+        """
+        wanted = bool(alarm.get("enabled"))
+        shown = bool(self.alarm_label.winfo_ismapped())
+        if wanted:
+            self.alarm_label.configure(
+                text=(t("widget.alarm", minutes=alarm.get("minutes", 15))
+                      if away else t("widget.alarm.idle")),
+                fg=SECONDARY if away else MUTED)
+        if wanted == shown:
+            return
+        if wanted:
+            self.alarm_label.pack(fill="x", pady=(4, 0), before=self.limits_bar)
+        else:
+            self.alarm_label.pack_forget()
+        self.root.geometry("")                  # the card grew or shrank
+        self.root.after(50, self.place_punch)   # the capsule may have moved
 
     def layout_limits(self):
         """Fold the meters — and the Fable row inside them — in or out.

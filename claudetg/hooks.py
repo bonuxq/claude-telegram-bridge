@@ -25,6 +25,10 @@ EVENTS = {
     "UserPromptSubmit": [None],
     "PreToolUse": ["AskUserQuestion"],
     "PostToolUse": ["TodoWrite"],
+    # Once per batch of tool calls, before the next model request — the one
+    # place a task typed mid-turn can reach the session without waiting for
+    # the turn to end. Matcher-less by design: it is not about which tool ran.
+    "PostToolBatch": [None],
     "PostToolUseFailure": [None],
     "Notification": [None],
 }

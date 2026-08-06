@@ -43,6 +43,59 @@ def log(*parts):
             pass
 
 
+CHAT_APPS = ("telegram.exe", "telegram desktop.exe", "unigram.exe", "64gram.exe")
+
+
+def foreground_app():
+    """The program in front right now, lower-cased, or None if unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(),
+                                        ctypes.byref(pid))
+        if not pid.value:
+            return None
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)  # LIMITED_INFO
+        if not handle:
+            return None
+        try:
+            size = wintypes.DWORD(260)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buf,
+                                                       ctypes.byref(size)):
+                return None
+            return buf.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def input_idle_seconds():
+    """Seconds since the last key press or mouse movement, system-wide.
+
+    None when the question cannot be asked — off Windows, or if the call
+    fails — so a caller can tell "nobody has touched it" apart from "no idea",
+    and never mistake the second for the first.
+    """
+    try:
+        import ctypes
+
+        class LastInput(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LastInput()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        return max(0.0, (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 class Waiter:
     """A hook blocked on the user. Resolved by a Telegram update or a timeout."""
 
@@ -130,19 +183,54 @@ class Daemon:
         """
         return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
 
-    def topic_for(self, project_key, project_name):
-        """Return the project's forum topic, creating it on first use.
+    def per_session_topics(self):
+        return bool((self.cfg.get("session_topics") or {}).get("enabled"))
 
-        One topic per project, however many windows are open on it. Giving
-        each session its own numbered thread was tried and taken back out:
-        a finished session stops listening, so its thread became a dead end
-        nobody could talk to, and the group filled with them.
+    @staticmethod
+    def topic_key(project_key, number):
+        """Number 1 keeps the project's own key, so a group that has always
+        had one topic per project keeps using it when this is switched on."""
+        return project_key if number <= 1 else f"{project_key}#{number}"
+
+    def topic_number(self, project_key, session_id):
+        """Which numbered thread this chat owns, for as long as it exists.
+
+        Bound to the session id and never handed back. The first attempt at
+        this numbered by slot and released the number when the window closed,
+        so continuing the same chat in the editor was given whichever number
+        happened to be free — a conversation that already had a thread got a
+        second one, and which thread was which stopped meaning anything.
+
+        A session id survives closing the editor and reopening the chat: the
+        transcript of this very conversation carries one id across three days
+        and several restarts. So the same chat comes back to the same topic,
+        and only a genuinely new chat is given a new number.
         """
+        with self.lock:
+            table = self.state.setdefault("session_topics", {}).setdefault(
+                project_key, {})
+            number = table.get(session_id)
+            if number is None:
+                number = max(table.values(), default=0) + 1
+                table[session_id] = number
+        self.persist()
+        return number
+
+    def topic_for(self, project_key, project_name, session_id=None):
+        """Return the forum topic to write in, creating it on first use.
+
+        One topic per project unless session_topics is on, in which case each
+        chat gets its own numbered thread — and keeps it.
+        """
+        number = 1
+        if session_id and self.per_session_topics():
+            number = self.topic_number(project_key, session_id)
+            project_key = self.topic_key(project_key, number)
         with self.lock:
             existing = self.state["topics"].get(project_key)
         if existing:
             return existing
-        title = project_name
+        title = project_name if number <= 1 else f"{project_name} #{number}"
         try:
             topic = self.bot.create_topic(self.cfg["chat_id"], title[:128])
             tid = topic["message_thread_id"]
@@ -152,18 +240,24 @@ class Daemon:
         with self.lock:
             self.state["topics"][project_key] = tid
         self.persist()
+        if tid:
+            # A topic without the switch is a topic you cannot hand control
+            # over from, and a new one is created exactly when somebody starts
+            # working somewhere new.
+            self.refresh_topic_switches(only=tid)
         return tid
 
     def send(self, project_key, project_name, text, markup=None, silent=None,
-             thread=None):
+             thread=None, session=None):
         """Send rendered HTML to the project's topic. Returns message ids.
 
-        `thread` overrides it, for a reply that must land where it was asked.
+        `session` picks that chat's own thread when session_topics is on;
+        `thread` overrides both, for a reply that must land where it was asked.
         """
         if not self.linked():
             return []       # not set up yet: stay silent instead of timing out
         if thread is None:
-            thread = self.topic_for(project_key, project_name)
+            thread = self.topic_for(project_key, project_name, session)
         if silent is None:
             silent = not self.away
         ids = []
@@ -177,6 +271,21 @@ class Daemon:
                 ids.append(msg["message_id"])
             except TelegramError as e:
                 log("sendMessage failed:", e)
+                if _thread_gone(e) and thread is not None:
+                    # The topic was deleted in Telegram. Its id is still in
+                    # state, so every message for that project would be posted
+                    # into nothing: forget it, make a new one, and deliver.
+                    self.forget_topic(thread)
+                    thread = self.topic_for(project_key, project_name, session)
+                    try:
+                        msg = self.bot.send_message(
+                            self.cfg["chat_id"], body, thread_id=thread,
+                            markup=markup if last else None, silent=silent,
+                        )
+                        ids.append(msg["message_id"])
+                    except TelegramError as e2:
+                        log("retry in a fresh topic failed:", e2)
+                    continue
                 if e.code == 400 and "parse" in (e.description or "").lower():
                     # Never lose content to a formatting error: retry as plain.
                     try:
@@ -294,7 +403,7 @@ class Daemon:
         if not key:
             return
         ids = self.send(key, name, render.render(text, header=f"💬 <b>{html.escape(name)}</b>"),
-                        silent=not self.away)
+                        silent=not self.away, session=session_id)
         if not ids:
             return      # nothing reached the chat: let the closing message carry it
         with self.lock:
@@ -351,18 +460,22 @@ class Daemon:
         now = time.time()
         stalled = []
         with self.lock:
-            for session in self.sessions.values():
+            for sid, session in self.sessions.items():
                 started = session.get("turn_started")
                 if not started or session.get("stall_alerted"):
                     continue
                 if now - started >= limit:
                     session["stall_alerted"] = True
                     stalled.append((session.get("project"), session.get("name"),
-                                    now - started))
-        for key, name, elapsed in stalled:
+                                    now - started, sid))
+        for key, name, elapsed, sid in stalled:
+            # Into the thread of the session that is stuck, not the project's:
+            # "this one has not moved in twenty minutes" is only useful next
+            # to the conversation it is about.
             self.send(key, name or "?",
                       t("stall", name=html.escape(name or "?"),
-                        duration=render.duration(elapsed)), silent=False)
+                        duration=render.duration(elapsed)), silent=False,
+                      session=sid)
 
     def digest_forever(self, hour):
         while True:
@@ -661,30 +774,63 @@ class Daemon:
 
     # -- hook events ----------------------------------------------------
 
+    def session_home(self, data):
+        """Where this session was opened, which is what it belongs to.
+
+        A shared directory cannot answer this: a game client is worked on from
+        four or five projects, and binding it to one of them files everybody
+        else's sessions under that one. Each session has its own transcript
+        and its own first entry, so each answers for itself.
+
+        Read once per session and remembered. Falls back to the current
+        directory when there is no transcript to ask — a session that has one
+        is the normal case, and one that does not is no worse off than before.
+        """
+        session_id = data.get("session_id")
+        with self.lock:
+            cached = (self.sessions.get(session_id) or {}).get("home")
+        if cached:
+            return cached
+        home = transcript.home_cwd(data.get("transcript_path"))
+        home = home or data.get("cwd") or ""
+        if session_id:
+            with self.lock:
+                self.sessions.setdefault(session_id, {})["home"] = home
+        return home
+
     def resolve_project(self, data):
         """(key, display name) for an event, or None to stay out of the way.
 
-        Order matters: an explicit `projects` entry wins so custom names and
-        extra_paths keep working; auto-discovery is the fallback.
+        Order matters: a session already known keeps the project it opened
+        in, whatever directory it is standing in now; otherwise an explicit
+        `projects` entry wins so custom names and extra_paths keep working,
+        and auto-discovery is the fallback.
         """
         cwd = data.get("cwd") or ""
         transcript = data.get("transcript_path")
         if cfgmod.is_excluded(self.cfg, cwd, transcript):
             return None
 
-        match = cfgmod.project_for(self.cfg, cwd)
+        session_id = data.get("session_id")
+        with self.lock:
+            known = self.sessions.get(session_id) or {}
+            if known.get("project"):
+                # A session belongs to the project it opened in, for as long
+                # as it lives. `cwd` is wherever it happens to be standing,
+                # and a session that steps into another project's tree used to
+                # step into that project's topic with it: seen live, a
+                # converter working through a game client alternated between
+                # two topics for minutes, one line here and the next there,
+                # because the client directory is bound to another project.
+                return known["project"], known.get("name") or "?"
+
+        match = cfgmod.project_for(self.cfg, self.session_home(data))
         if match:
             key, meta = match
             return key, meta.get("name") or os.path.basename(key.rstrip("/"))
 
         if not self.cfg.get("auto_discover", True):
             return None
-
-        session_id = data.get("session_id")
-        with self.lock:
-            known = self.sessions.get(session_id) or {}
-            if known.get("project"):
-                return known["project"], known.get("name") or "?"
 
         key = cfgmod.transcript_project_key(transcript)
         if not key:
@@ -728,6 +874,7 @@ class Daemon:
             "UserPromptSubmit": self.on_prompt_submit,
             "PreToolUse": self.on_pre_tool_use,
             "PostToolUse": self.on_post_tool_use,
+            "PostToolBatch": self.on_post_tool_batch,
             "PostToolUseFailure": self.on_tool_failure,
             "Notification": self.on_notification,
         }.get(event)
@@ -748,7 +895,7 @@ class Daemon:
             mode = t("mode.away") if self.away else t("mode.atpc")
             self.send(key, name,
                       t("session.opened", name=html.escape(name), mode=mode),
-                      silent=True)
+                      silent=True, session=sid)
         return self.drain_queue(key)
 
     def on_session_end(self, data, key, name):
@@ -761,7 +908,7 @@ class Daemon:
                 summary = self.git_summary(data.get("cwd"))
                 if summary:
                     note += f"\n{summary}"
-            self.send(key, name, note, silent=True)
+            self.send(key, name, note, silent=True, session=session_id)
         with self.lock:
             self.sessions.pop(session_id, None)
         return {}
@@ -785,13 +932,14 @@ class Daemon:
         detail = _describe_failure(data) or t("fail.api.text")
         head = render.header("🛑", t("fail.api.head", name=name))
         self.send(key, name, render.render(f"```\n{detail[:1500]}\n```", header=head),
-                  silent=False)
+                  silent=False, session=data.get("session_id"))
         return {}
 
     def on_notification(self, data, key, name):
         message = data.get("message") or ""
         if message and self.should_log("notification"):
-            self.send(key, name, f"🔔 {html.escape(message)}")
+            self.send(key, name, f"🔔 {html.escape(message)}",
+                      session=data.get("session_id"))
         return {}
 
     ICONS = {"completed": "✅", "in_progress": "🔸", "pending": "▫️"}
@@ -803,6 +951,36 @@ class Daemon:
         if todos and self.should_log("todo"):
             self.upsert_todos(data.get("session_id"), key, name, todos)
         return {}
+
+    def on_post_tool_batch(self, data, key, name):
+        """Hand over anything typed while the turn was still running.
+
+        Typing into the editor mid-action reaches the session at its next
+        model request; a task typed into Telegram used to wait for the turn
+        to end, so a correction arrived after the work it was meant to
+        correct. This is the same door: the batch has resolved and the next
+        request has not been made yet.
+        """
+        return self.hand_over(key, name, "PostToolBatch", data.get("session_id"))
+
+    def hand_over(self, key, name, event, session_id=None):
+        """Give the project's queue to the turn that is running right now.
+
+        Nothing is said when the queue is empty, which is almost every batch
+        of almost every turn — this runs on the session's hot path and must
+        cost nothing when there is nothing to say.
+        """
+        with self.lock:
+            if not self.queue.get(key):
+                return {}
+        items = self.take_queue(key)
+        if not items:
+            return {}
+        self.send(key, name, t("queue.handed", task=html.escape(items[0][:300])),
+                  silent=True, session=session_id)
+        return {"hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": t("queue.live") + "\n" + _join_tasks(items)}}
 
     def render_todos(self, todos, name):
         done = sum(1 for item in todos if item.get("status") == "completed")
@@ -832,7 +1010,7 @@ class Daemon:
                 if "not modified" in (e.description or "").lower():
                     return
                 log("todo edit failed, posting fresh:", e)
-        ids = self.send(key, name, text, silent=True)
+        ids = self.send(key, name, text, silent=True, session=session_id)
         if ids:
             with self.lock:
                 self.state.setdefault("todo_msgs", {})[session_id] = ids[-1]
@@ -856,11 +1034,13 @@ class Daemon:
             body.append(f"```\n{detail[:1500]}\n```")
         if not body:
             body.append(t("fail.tool.empty"))
-        self.send(key, name, render.render("\n\n".join(body), header=head))
+        self.send(key, name, render.render("\n\n".join(body), header=head),
+                  session=data.get("session_id"))
         return {}
 
     def on_stop(self, data, key, name):
         sid = data.get("session_id")
+        began = time.time()
         text, seconds = transcript.summarize(data.get("transcript_path"))
         with self.lock:
             self.sessions.setdefault(sid, {}).update(
@@ -890,45 +1070,96 @@ class Daemon:
         if queued:
             # A task was sent while nobody was listening: run it now.
             self.send(key, name, self.closing(text, render.header("✅", name, seconds),
-                                              streamed))
+                                              streamed), session=sid)
             self.report_usage()
             self.send(key, name, t("queue.next", task=html.escape(queued[0][:300])),
-                      silent=True)
+                      silent=True, session=sid)
             return {"decision": "block", "reason": _join_tasks(queued)}
 
         head = render.header("✅", name, seconds)
+        reported = False
         if not self.away:
+            # Say it now rather than after the hold below, or a turn that ends
+            # while nobody is at the desk would keep its summary to itself for
+            # as long as the hold lasts.
             if self.should_log("stop"):
                 self.send(key, name, self.closing(text, head, streamed),
-                          silent=True)
+                          silent=True, session=sid)
             self.report_usage()
-            return {}
+            reported = True
+            self.await_switch()
+            if not self.away:
+                return {}
 
-        thread = self.topic_for(key, name)
-        waiter = Waiter("stop", sid, key)
-        markup = {"inline_keyboard": [[
-            {"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
-            {"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"},
-        ]]}
-        msgs = self.closing(text, head, streamed)
+        thread = self.topic_for(key, name, sid)
+        # The summary has already been sent when the switch arrived late; only
+        # the buttons are still owed.
+        msgs = ([t("stop.again")] if reported
+                else self.closing(text, head, streamed))
         msgs[-1] += f"\n\n<i>{t('stop.await')}</i>"
-        ids = self.send(key, name, msgs, markup=markup, thread=thread)
-        self.report_usage()
-        self.register(waiter, key, ids, thread)
+        while True:
+            waiter = Waiter("stop", sid, key)
+            markup = {"inline_keyboard": [
+                [{"text": t("btn.continue"), "callback_data": f"go:{waiter.id}"},
+                 {"text": t("btn.hold"), "callback_data": f"hold:{waiter.id}"}],
+                [{"text": t("btn.enough"), "callback_data": f"end:{waiter.id}"}],
+            ]}
+            ids = self.send(key, name, msgs, markup=markup, thread=thread)
+            if not reported:
+                self.report_usage()
+                reported = True
+            self.register(waiter, key, ids, thread)
 
-        result = waiter.wait(self.cfg["wait_seconds"])
-        self.unregister(waiter)
-        if not result:
-            self.park(sid)
-            self.send(key, name, t("stop.parked") if self.can_spawn(key)
-                      else t("stop.timeout"), silent=True)
-            return {}
-        if result.get("released"):
-            self.send(key, name, t("stop.released"), silent=True)
-            return {}
-        if result.get("action") == "end":
-            return {}
-        return {"decision": "block", "reason": result["text"]}
+            # Whatever the hold already spent comes out of the wait: both
+            # happen inside one hook, and together they must stay under the
+            # timeout Claude Code gives it.
+            left = self.cfg["wait_seconds"] - (time.time() - began)
+            alarm = self.alarm_seconds()
+            if alarm:
+                # Check back rather than wait the whole four hours out: the
+                # session is only reachable while a turn of it is running, so
+                # coming back often is what keeps it reachable at all.
+                left = min(left, alarm)
+            result = waiter.wait(max(1, left))
+            self.unregister(waiter)
+            if not result:
+                if alarm:
+                    self.send(key, name, t("alarm.armed", minutes=alarm // 60),
+                              silent=True, session=sid)
+                    return {"decision": "block",
+                            "reason": t("alarm.set", seconds=alarm)}
+                self.park(sid)
+                self.send(key, name, t("stop.parked") if self.can_spawn(key)
+                          else t("stop.timeout"), silent=True, session=sid)
+                return {}
+            if result.get("released"):
+                # Back at the keyboard, so the hook goes back to the editor —
+                # but stepping away again a moment later used to find nothing
+                # left to hold. Hold once more while the desk stays quiet.
+                self.send(key, name, t("stop.released"), silent=True, session=sid)
+                self.await_switch()
+                if self.away:
+                    msgs = [t("stop.again") + f"\n\n<i>{t('stop.await')}</i>"]
+                    continue
+                return {}
+            if result.get("action") == "hold" and alarm:
+                # Waiting is exactly what the alarm is for: without it the
+                # session goes quiet here and the round of checking back that
+                # was running stops with it.
+                self.send(key, name, t("alarm.armed", minutes=alarm // 60),
+                          silent=True, session=sid)
+                return {"decision": "block", "reason": t("alarm.set", seconds=alarm)}
+            if result.get("action") == "hold":
+                # Let the turn end without saying a word to the session: it set
+                # itself something to wake it, and the wait was the only thing
+                # standing between it and its own alarm. A task typed after this
+                # is handed over on the session's next batch, not at the next end
+                # of turn, so waiting here costs nothing.
+                self.send(key, name, t("stop.hold"), silent=True, session=sid)
+                return {}
+            if result.get("action") == "end":
+                return {}
+            return {"decision": "block", "reason": result["text"]}
 
     def closing(self, text, head, streamed=False):
         """Turn ending.
@@ -952,7 +1183,7 @@ class Daemon:
             return {}
 
         session_id = data.get("session_id")
-        thread = self.topic_for(key, name)
+        thread = self.topic_for(key, name, session_id)
         waiter = Waiter("ask", session_id, key,
                         {"questions": questions, "answers": {}})
         ids = []
@@ -965,7 +1196,7 @@ class Daemon:
         result = waiter.wait(self.cfg["wait_seconds"])
         self.unregister(waiter)
         if not result or result.get("released"):
-            self.send(key, name, t("ask.timeout"), silent=True)
+            self.send(key, name, t("ask.timeout"), silent=True, session=session_id)
             return {}
         return {
             "hookSpecificOutput": {
@@ -1053,6 +1284,116 @@ class Daemon:
                        and s.get("project") == key
                        for s in self.sessions.values())
 
+    def await_switch(self):
+        """Hold a finished turn for a moment, in case the switch is coming.
+
+        A turn that ends at the keyboard let its hook go at once, and with the
+        hook went the only way back into that session: flipping to away a
+        minute later reached a session nothing fires in any more, and a task
+        typed from the phone could do nothing but wait for the next thing
+        typed at the desk. Holding keeps that door open while the desk stays
+        untouched.
+
+        What ends the hold is a touch that happens *after* the turn did, not a
+        recent one: the key press that submitted the prompt of a short turn is
+        seconds old when it ends, and treating that as "still here" would shut
+        the door in exactly the case this exists for.
+        """
+        cfg = self.cfg.get("stop_grace") or {}
+        if not cfg.get("enabled", True):
+            return
+        grace = int(cfg.get("seconds") or 0)
+        if grace <= 0:
+            return
+        if input_idle_seconds() is None:
+            # No way to notice somebody sitting down again, and holding a turn
+            # that only the switch could release would strand every one of
+            # them for the full window. Without the signal, do not hold.
+            return
+        started = time.time()
+        while True:
+            waited = time.time() - started
+            if waited >= grace:
+                return
+            if self.away:
+                log(f"turn held {int(waited)}s and caught the switch")
+                return
+            idle = input_idle_seconds()
+            if idle is not None and idle < waited:
+                if foreground_app() in CHAT_APPS:
+                    # Reaching for the switch is not coming back to work. The
+                    # click that presses it counts as input, and it lands here
+                    # a second before the switch does, so counting it let go of
+                    # the very turn the press was meant to keep.
+                    time.sleep(0.25)
+                    continue
+                # Any touch may still be the hand on the switch — the widget
+                # sits on this screen too, and a press there is a click like
+                # any other. Wait out the round trip before deciding it was
+                # somebody sitting back down to work.
+                settle = time.time() + self.SWITCH_LINGER
+                while time.time() < settle:
+                    if self.away:
+                        log(f"turn held {int(time.time() - started)}s"
+                            " and caught the switch")
+                        return
+                    time.sleep(0.1)
+                return          # somebody is at the desk: do not hold them up
+            time.sleep(0.25)
+
+    def alarm_seconds(self):
+        """How long the session should sleep before checking back, or 0.
+
+        Nothing outside a session can start a turn in it. A wait that runs out
+        leaves it out of reach until somebody types at the keyboard — but a
+        session that starts something in the background is woken when that
+        thing finishes, and a turn it wakes into is a turn the chat can reach.
+        """
+        cfg = self.cfg.get("wake_alarm") or {}
+        if not cfg.get("enabled"):
+            return 0
+        return max(60, int(cfg.get("minutes") or 15) * 60)
+
+    def working_session(self, key):
+        """Is a turn of this project running right now?
+
+        live_session() answers a different question — whether a session could
+        take work at all — and one that finished its turn at the keyboard
+        answers yes to that while nothing whatsoever is running. Promising a
+        handoff there promises a step that is not coming.
+        """
+        with self.lock:
+            return any(self.session_alive(s) and not s.get("parked")
+                       and s.get("project") == key and s.get("turn_started")
+                       for s in self.sessions.values())
+
+    def idle_sessions(self):
+        """Projects whose session finished its turn before the switch flipped.
+
+        Its Stop hook has already answered and gone, so nothing fires in it
+        again until somebody types in the editor: it cannot be reached from
+        the chat however alive it looks. Seen live — a turn ended at 12:04:59,
+        away went on a minute later, and the task typed after that was told a
+        working session would take it at its next step. There was no next step.
+
+        Reported, not parked. Parking is the verdict that the window has been
+        abandoned, which is what lets an agent be started for the project, and
+        a session that stopped typing a minute ago has abandoned nothing — the
+        first version of this parked them and a message meant for the session
+        in the editor started a second agent in the same directory instead.
+
+        Returns the projects that are out of reach, one entry each.
+        """
+        idle = {}
+        with self.lock:
+            waited = {w.session_id for w in self.waiters.values()}
+            for sid, session in self.sessions.items():
+                if (self.session_alive(session) and not session.get("parked")
+                        and not session.get("turn_started") and sid not in waited):
+                    idle.setdefault(session.get("project"),
+                                    (session.get("name") or "", sid))
+        return [(key, name, sid) for key, (name, sid) in idle.items()]
+
     def park(self, session_id):
         """The session stopped listening to the chat. Reversed by its next
         event, which only happens when it is used at the keyboard again."""
@@ -1089,7 +1430,8 @@ class Daemon:
             self.queue.setdefault(key, []).append(task)
         self.persist()
         self.send(key, self.project_name(key),
-                  t("queue.rescued", task=html.escape(task[:300])), silent=False)
+                  t("queue.rescued", task=html.escape(task[:300])), silent=False,
+                  session=session_id)
 
     def forget_stale_sessions(self):
         """Drop sessions nothing has been heard from in hours."""
@@ -1292,7 +1634,45 @@ class Daemon:
             return self.on_command(text, chat_id, thread, message)
         if self.cfg["chat_id"] and chat_id != self.cfg["chat_id"]:
             return
+        if self.is_mode_press(text):
+            # The panel button sends its own label as an ordinary message, so
+            # it has to be recognised here or it would become a task.
+            self.toggle_away()
+            try:
+                self.bot.delete_message(chat_id, message["message_id"])
+            except TelegramError as e:
+                log("could not clear the panel press:", e)
+            return
         self.deliver_text(text, thread, message)
+
+    @staticmethod
+    def is_mode_press(text):
+        return text.strip() == t("panel.mode") or text.strip().startswith("🔁")
+
+    def mode_panel(self):
+        """One button beside the message box, in every topic of the group.
+
+        A pinned message cannot be made to stick to a topic — pinning is
+        chat-wide — and commands are typed by nobody. A reply keyboard sits
+        where the typing happens and stays there, so the one thing worth
+        reaching for is always within reach.
+        """
+        return {"keyboard": [[{"text": t("panel.mode")}]],
+                "is_persistent": True, "resize_keyboard": True}
+
+    def offer_mode_panel(self):
+        """Set the panel once. It survives on its own afterwards."""
+        if not self.linked() or self.state.get("panel_sent"):
+            return
+        try:
+            self.bot.send_message(self.cfg["chat_id"], t("panel.ready"),
+                                  markup=self.mode_panel(), silent=True)
+        except TelegramError as e:
+            log("mode panel failed:", e)
+            return
+        with self.lock:
+            self.state["panel_sent"] = True
+        self.persist()
 
     def deliver_text(self, text, thread, message):
         """Route a plain message: to a waiting hook, or onto the project queue."""
@@ -1320,7 +1700,18 @@ class Daemon:
         with self.lock:
             self.queue.setdefault(key, []).append(text)
         self.persist()
-        self.ack(message, t("ack.queued"))
+        # Three different waits, and calling them all a queue told you
+        # nothing about which one you were in. A running turn takes this at
+        # its next batch; a session sitting between turns takes it the moment
+        # it moves, which may be when you type at the keyboard; with nothing
+        # open at all it waits for a session to exist.
+        if self.working_session(key):
+            said = t("ack.handoff")
+        elif self.live_session(key):
+            said = t("ack.midstep")
+        else:
+            said = t("ack.queued")
+        self.ack(message, said)
 
     def answer_by_text(self, waiter, text, message):
         """Free-text reply to a question message answers that question."""
@@ -1356,6 +1747,8 @@ class Daemon:
         if parts[0] == "go":
             waiter.resolve({"action": "continue",
                             "text": t("task.default")})
+        elif parts[0] == "hold":
+            waiter.resolve({"action": "hold"})
         elif parts[0] == "end":
             waiter.resolve({"action": "end"})
         elif parts[0] in ("a", "m", "d"):
@@ -1398,7 +1791,8 @@ class Daemon:
         elif cmd in ("/away", "/here"):
             self.set_away(cmd == "/away")
         elif cmd == "/status":
-            self.bot.send_message(chat_id, self.status_text(), thread_id=thread)
+            self.bot.send_message(chat_id, self.status_text(), thread_id=thread,
+                                  markup=self.mode_markup())
         elif cmd == "/projects":
             self.show_projects(chat_id, thread)
         elif cmd == "/release":
@@ -1524,6 +1918,9 @@ class Daemon:
         "usage_poll.enabled",
         "status_monitor.enabled",
         "watchdog.enabled",
+        "stop_grace.enabled",
+        "session_topics.enabled",
+        "wake_alarm.enabled",
         "daily_digest.enabled",
         "git_summary",
         "log_when_present.stop",
@@ -1576,6 +1973,14 @@ class Daemon:
                     lang = enabled if enabled in i18n.LANGUAGES else None
                     self.cfg["language"] = lang
                     i18n.set_language(lang)
+                elif path == "wake_alarm.minutes":
+                    # A number, not a switch: zero is how the widget's little
+                    # box says "no alarm", so it turns the thing off too.
+                    minutes = max(0, min(240, int(enabled or 0)))
+                    section = dict(self.cfg.get("wake_alarm") or {})
+                    section["enabled"] = minutes > 0
+                    section["minutes"] = minutes or section.get("minutes", 15)
+                    self.cfg["wake_alarm"] = section
                 elif path in self.TOGGLES:
                     self.set_setting(path, enabled)
         cfgmod.save(self.cfg)
@@ -1698,8 +2103,11 @@ class Daemon:
             waiting = [{"project": w.project, "kind": w.kind}
                        for w in self.waiters.values()]
             queued = sum(len(v) for v in self.queue.values())
+        cfg = self.cfg.get("wake_alarm") or {}
         return {"away": self.away, "sessions": sessions,
-                "waiting": waiting, "queued": queued}
+                "waiting": waiting, "queued": queued,
+                "alarm": {"enabled": bool(cfg.get("enabled")),
+                          "minutes": int(cfg.get("minutes") or 15)}}
 
     def toggle_away(self):
         self.set_away(not self.away)
@@ -1713,6 +2121,13 @@ class Daemon:
             # Back at the keyboard: never leave a hook blocking on a chat you
             # are no longer reading. Control returns to VSCode immediately.
             self.release_all()
+        if value and not was_away:
+            # Handing control over does not reach back into a turn that has
+            # already ended. Say which sessions those are, at the one moment
+            # the answer is useful.
+            for key, name, sid in self.idle_sessions():
+                if key:
+                    self.send(key, name, t("away.idle"), silent=True, session=sid)
         self.refresh_status()
 
     def release_all(self):
@@ -1723,13 +2138,138 @@ class Daemon:
             waiter.resolve({"released": True})
         return len(waiters)
 
-    def refresh_status(self):
-        if not self.linked():
-            return
-        markup = {"inline_keyboard": [[{
+    def mode_markup(self):
+        """The one button that hands control over and takes it back.
+
+        It lives on the pinned status message, which sits in the group itself
+        rather than in any topic — easy to lose behind a dozen threads. /status
+        answers with it too, so it is reachable from wherever you are typing.
+        """
+        return {"inline_keyboard": [[{
             "text": t("pin.here") if self.away else t("pin.away"),
             "callback_data": "mode",
         }]]}
+
+    # Between full passes over every topic, whatever asks for them.
+    SWITCH_MIN_GAP = 15
+    # How long a touch waits to turn out to have been the switch being
+    # pressed. Paid at the end of every turn worked through at the desk, so
+    # it buys only the round trip of a click on this screen and no more.
+    SWITCH_LINGER = 2
+
+    def forget_topic(self, tid):
+        """Drop a topic that no longer exists, so a new one is made instead.
+
+        A deleted topic leaves its id behind in state, and everything aimed at
+        it disappears: with a topic per chat this is not hypothetical, since
+        the numbered threads of an earlier version are exactly the ones people
+        clear out of the group.
+        """
+        with self.lock:
+            for key in [k for k, v in self.state["topics"].items() if v == tid]:
+                del self.state["topics"][key]
+            (self.state.get("status_msgs") or {}).pop(str(tid), None)
+        self.persist()
+        log("topic", tid, "is gone; it will be created again on demand")
+
+    def switch_text(self):
+        """What the copy in a topic says: the mode and nothing else.
+
+        The full status names the live sessions, so it changes several times a
+        minute — and a line that never settles cannot be checked against what
+        is on screen without rewriting it every time.
+        """
+        return t("mode.status.away") if self.away else t("mode.status.atpc")
+
+    def switch_in_topic(self, tid, text, markup):
+        """Put the switch at the top of one topic, or bring it up to date.
+
+        Posted once and only ever edited afterwards. The first version fell
+        back to posting whenever an edit failed, which on a rate limit meant a
+        second copy in every topic, and a pin with it — a refresh turned into
+        a storm, and Telegram raised itself over the editor for each one.
+        """
+        with self.lock:
+            mid = (self.state.get("status_msgs") or {}).get(str(tid))
+            if mid and (self.state.get("switch_said") or {}).get(str(tid)) == text:
+                return          # already says this; nothing to ask Telegram
+        if mid:
+            try:
+                self.bot.edit_message(self.cfg["chat_id"], mid, text, markup=markup)
+                return self.remember_switch(tid, text)
+            except TelegramError as e:
+                if "not modified" in (e.description or "").lower():
+                    return self.remember_switch(tid, text)
+                if _thread_gone(e):
+                    return self.forget_topic(tid)
+                if not _message_gone(e):
+                    log("topic switch edit failed:", e)
+                    return      # transient: the copy that is there still works
+        try:
+            msg = self.bot.send_message(self.cfg["chat_id"], text, thread_id=tid,
+                                        markup=markup, silent=True)
+        except TelegramError as e:
+            if _thread_gone(e):
+                return self.forget_topic(tid)
+            log("topic switch failed:", e)
+            return
+        with self.lock:
+            self.state.setdefault("status_msgs", {})[str(tid)] = msg["message_id"]
+        self.remember_switch(tid, text)
+
+    def remember_switch(self, tid, text):
+        """Only what Telegram actually accepted, so a refusal is retried."""
+        with self.lock:
+            self.state.setdefault("switch_said", {})[str(tid)] = text
+
+    def switches_forever(self):
+        """Keep the buttons honest.
+
+        They were written once, when the mode changed, and a refusal there —
+        a rate limit, a hiccup — left a button that said the opposite of the
+        truth with nothing to correct it. Saying nothing costs nothing now,
+        so this can simply keep checking.
+        """
+        while True:
+            time.sleep(30)
+            try:
+                self.refresh_topic_switches()
+            except Exception as e:
+                log("switch refresh error:", type(e).__name__, e)
+
+    def refresh_topic_switches(self, only=None):
+        """The switch, pinned in every project topic rather than only the one.
+
+        The status message lives in the group itself, which a forum shows as a
+        tab of its own: the one button that hands control over was a tab away
+        from every topic the work actually happens in. Each topic keeps its own
+        copy, edited in place, so this costs a handful of edits when the mode
+        changes and nothing at all in between.
+        """
+        if not self.linked():
+            return
+        now = time.time()
+        if only is None:
+            # One pass touches every topic, so a burst of mode changes would
+            # multiply into a burst per topic.
+            if now - getattr(self, "_switches_at", 0) < self.SWITCH_MIN_GAP:
+                return
+            self._switches_at = now
+        service = {k for k, _ in self.SERVICE_TOPICS}
+        with self.lock:
+            topics = [tid for key, tid in self.state["topics"].items()
+                      if tid and key not in service]
+        text, markup = self.switch_text(), self.mode_markup()
+        for tid in topics:
+            if only is None or tid == only:
+                self.switch_in_topic(tid, text, markup)
+        self.persist()
+
+    def refresh_status(self):
+        if not self.linked():
+            return
+        self.refresh_topic_switches()
+        markup = self.mode_markup()
         text = self.status_text()
         mid = self.state.get("status_message_id")
         try:
@@ -1800,6 +2340,20 @@ def _describe_failure(data):
 def _strip_tags(text):
     import re
     return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+def _message_gone(error):
+    """The message we meant to edit is not there to edit any more."""
+    text = (getattr(error, "description", "") or "").lower()
+    return getattr(error, "code", None) == 400 and (
+        "message to edit not found" in text or "message can't be edited" in text
+        or "message identifier is not specified" in text)
+
+
+def _thread_gone(error):
+    """Telegram's way of saying the topic this was aimed at is not there."""
+    return (getattr(error, "code", None) == 400
+            and "thread not found" in (error.description or "").lower())
 
 
 def _join_tasks(items):
@@ -1924,6 +2478,7 @@ def main():
             log("token not usable yet:", e)
         if cfg["chat_id"]:
             daemon.ensure_service_topics()
+            daemon.offer_mode_panel()
             daemon.refresh_status()
     else:
         log("no bot token yet — waiting for the setup screen")
@@ -1946,6 +2501,7 @@ def main():
                      daemon=True).start()
     threading.Thread(target=daemon.usage_poll_forever, daemon=True).start()
     threading.Thread(target=daemon.update_forever, daemon=True).start()
+    threading.Thread(target=daemon.switches_forever, daemon=True).start()
     log("background workers started (status, watchdog, digest, usage, updates)")
 
     log(f"listening on http://{cfg['host']}:{cfg['port']}")

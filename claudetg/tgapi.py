@@ -80,6 +80,9 @@ class Bot:
             link_preview_options={"is_disabled": True},
         )
 
+    def delete_message(self, chat_id, message_id):
+        return self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
+
     def pin_message(self, chat_id, message_id):
         return self.call(
             "pinChatMessage",

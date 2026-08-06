@@ -29,6 +29,9 @@
 
   "status_monitor": { "enabled": true, "interval_seconds": 600, "components": [] },
   "watchdog": { "enabled": true, "minutes": 20 },
+  "stop_grace": { "enabled": true, "seconds": 3600 },
+  "session_topics": { "enabled": false },
+  "wake_alarm": { "enabled": false, "minutes": 15 },
   "daily_digest": { "enabled": true, "hour": 21 },
   "stats_retention_days": 14,
 
