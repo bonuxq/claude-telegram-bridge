@@ -722,13 +722,28 @@ class Daemon:
     def resolve_project(self, data):
         """(key, display name) for an event, or None to stay out of the way.
 
-        Order matters: an explicit `projects` entry wins so custom names and
-        extra_paths keep working; auto-discovery is the fallback.
+        Order matters: a session already known keeps the project it opened
+        in, whatever directory it is standing in now; otherwise an explicit
+        `projects` entry wins so custom names and extra_paths keep working,
+        and auto-discovery is the fallback.
         """
         cwd = data.get("cwd") or ""
         transcript = data.get("transcript_path")
         if cfgmod.is_excluded(self.cfg, cwd, transcript):
             return None
+
+        session_id = data.get("session_id")
+        with self.lock:
+            known = self.sessions.get(session_id) or {}
+            if known.get("project"):
+                # A session belongs to the project it opened in, for as long
+                # as it lives. `cwd` is wherever it happens to be standing,
+                # and a session that steps into another project's tree used to
+                # step into that project's topic with it: seen live, a
+                # converter working through a game client alternated between
+                # two topics for minutes, one line here and the next there,
+                # because the client directory is bound to another project.
+                return known["project"], known.get("name") or "?"
 
         match = cfgmod.project_for(self.cfg, cwd)
         if match:
@@ -737,12 +752,6 @@ class Daemon:
 
         if not self.cfg.get("auto_discover", True):
             return None
-
-        session_id = data.get("session_id")
-        with self.lock:
-            known = self.sessions.get(session_id) or {}
-            if known.get("project"):
-                return known["project"], known.get("name") or "?"
 
         key = cfgmod.transcript_project_key(transcript)
         if not key:

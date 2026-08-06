@@ -236,6 +236,37 @@ def test_task_reaches_a_turn_already_running():
     print("PASS a task typed mid-turn reaches the running session")
 
 
+def test_a_session_keeps_its_project_when_it_wanders():
+    """Seen live: a converter working through a game client changed topics.
+
+    The client directory is bound to another project by extra_paths, so every
+    event fired while the session stood there was filed under that project —
+    one line in one topic, the next in another, for as long as the work in
+    that directory lasted.
+    """
+    d = make_daemon("s.json", away=False)
+    convert = cfgmod.normalize("e:/convert_lic30-lic40")
+    reverse = cfgmod.normalize("c:/users/me/reversel2")
+    client = "E:/563 client/system"
+    d.cfg["projects"] = {
+        convert: {"name": "Convert"},
+        reverse: {"name": "ReverseL2", "extra_paths": [client]},
+    }
+
+    d.handle_event(evt("SessionStart", cwd="e:/convert_lic30-lic40",
+                       session_id="conv"))
+    assert d.sessions["conv"]["project"] == convert
+
+    wandered = d.resolve_project(evt("PostToolBatch", cwd=client,
+                                     session_id="conv"))
+    assert wandered[0] == convert, f"the converter moved to {wandered}"
+
+    # A session that genuinely opens there still belongs to that project.
+    fresh = d.resolve_project(evt("SessionStart", cwd=client, session_id="new"))
+    assert fresh[0] == reverse, fresh
+    print("PASS a session keeps its project wherever its cwd goes")
+
+
 def test_a_chat_continued_comes_back_to_its_own_topic():
     """The failure that took this feature out the first time.
 
