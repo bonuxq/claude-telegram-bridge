@@ -1570,7 +1570,45 @@ class Daemon:
             return self.on_command(text, chat_id, thread, message)
         if self.cfg["chat_id"] and chat_id != self.cfg["chat_id"]:
             return
+        if self.is_mode_press(text):
+            # The panel button sends its own label as an ordinary message, so
+            # it has to be recognised here or it would become a task.
+            self.toggle_away()
+            try:
+                self.bot.delete_message(chat_id, message["message_id"])
+            except TelegramError as e:
+                log("could not clear the panel press:", e)
+            return
         self.deliver_text(text, thread, message)
+
+    @staticmethod
+    def is_mode_press(text):
+        return text.strip() == t("panel.mode") or text.strip().startswith("🔁")
+
+    def mode_panel(self):
+        """One button beside the message box, in every topic of the group.
+
+        A pinned message cannot be made to stick to a topic — pinning is
+        chat-wide — and commands are typed by nobody. A reply keyboard sits
+        where the typing happens and stays there, so the one thing worth
+        reaching for is always within reach.
+        """
+        return {"keyboard": [[{"text": t("panel.mode")}]],
+                "is_persistent": True, "resize_keyboard": True}
+
+    def offer_mode_panel(self):
+        """Set the panel once. It survives on its own afterwards."""
+        if not self.linked() or self.state.get("panel_sent"):
+            return
+        try:
+            self.bot.send_message(self.cfg["chat_id"], t("panel.ready"),
+                                  markup=self.mode_panel(), silent=True)
+        except TelegramError as e:
+            log("mode panel failed:", e)
+            return
+        with self.lock:
+            self.state["panel_sent"] = True
+        self.persist()
 
     def deliver_text(self, text, thread, message):
         """Route a plain message: to a waiting hook, or onto the project queue."""
@@ -2319,6 +2357,7 @@ def main():
             log("token not usable yet:", e)
         if cfg["chat_id"]:
             daemon.ensure_service_topics()
+            daemon.offer_mode_panel()
             daemon.refresh_status()
     else:
         log("no bot token yet — waiting for the setup screen")

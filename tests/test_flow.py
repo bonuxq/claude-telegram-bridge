@@ -261,6 +261,28 @@ def test_a_deleted_topic_is_made_again():
     print("PASS a message outlives the topic it was aimed at")
 
 
+def test_the_panel_button_switches_instead_of_queueing():
+    """Its label arrives as an ordinary message and must not become a task."""
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.refresh_status = lambda: None
+    deleted = []
+    d.bot.delete_message = lambda chat, mid: deleted.append(mid)
+
+    d.on_update({"message": {"message_id": 77, "chat": {"id": -100},
+                             "message_thread_id": TOPIC,
+                             "text": i18n.t("panel.mode")}})
+    assert d.away, "the panel button must hand control over"
+    assert not d.queue.get(key), "it must not be read as a task"
+    assert deleted == [77], "the press is cleared from the topic"
+
+    d.on_update({"message": {"message_id": 78, "chat": {"id": -100},
+                             "message_thread_id": TOPIC, "text": "почини это"}})
+    assert d.queue.get(key) == ["почини это"], "ordinary text still queues"
+    print("PASS the panel button switches the mode and stays out of the queue")
+
+
 def test_every_topic_carries_the_switch():
     """Handing control over must not mean going to look for the button."""
     d = make_daemon("s.json", away=False)
