@@ -1757,7 +1757,7 @@ class Widget:
                 kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting)))
         if queued:
             info.append(t("widget.queued", n=queued))
-        self.show_alarm(snapshot.get("alarm") or {})
+        self.show_alarm(snapshot.get("alarm") or {}, away)
         # One line on the card; the full picture lives in the hover tip,
         # which drops the "Sessions:" prefix — it is plainly the session list.
         line = " · ".join(info)
@@ -1914,13 +1914,20 @@ class Widget:
         self.layout_limits()
         self.save_pos()
 
-    def show_alarm(self, alarm):
-        """Its own row while an alarm is set, and no row at all when none is."""
+    def show_alarm(self, alarm, away):
+        """Its own row while an alarm is set, and no row at all when none is.
+
+        It only ever runs while you are away — at the PC a session that stops
+        is a session you can simply type into — so the row says which of the
+        two it is rather than a number that is not counting.
+        """
         wanted = bool(alarm.get("enabled"))
         shown = bool(self.alarm_label.winfo_ismapped())
         if wanted:
             self.alarm_label.configure(
-                text=t("widget.alarm", minutes=alarm.get("minutes", 15)))
+                text=(t("widget.alarm", minutes=alarm.get("minutes", 15))
+                      if away else t("widget.alarm.idle")),
+                fg=SECONDARY if away else MUTED)
         if wanted == shown:
             return
         if wanted:

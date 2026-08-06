@@ -321,12 +321,21 @@ def test_every_topic_carries_the_switch():
     assert any(b["callback_data"] == "mode"
                for row in posted[-1]["markup"]["inline_keyboard"] for b in row)
 
-    # Flipping the mode edits what is there instead of posting it again.
-    before = len(d.bot.sent)
+    # Checking again with nothing changed must not ask Telegram anything:
+    # this runs on a timer, and a question a minute is a question too many.
+    before = len(d.bot.sent), len(d.bot.edits)
+    d._switches_at = 0
     d.refresh_topic_switches()
-    assert len(d.bot.sent) == before, "a refresh must not repost the switch"
+    assert (len(d.bot.sent), len(d.bot.edits)) == before, "asked for nothing"
+
+    # Flipping the mode edits what is there instead of posting it again.
+    d.state["away"] = True
+    d._switches_at = 0
+    d.refresh_topic_switches()
+    assert len(d.bot.sent) == before[0], "a refresh must not repost the switch"
     assert d.bot.edits and d.bot.edits[-1]["id"] == pinned[str(topic)]
-    print("PASS the switch is pinned in each topic and edited in place")
+    assert i18n.t("mode.status.away") in d.bot.edits[-1]["text"], d.bot.edits[-1]
+    print("PASS the switch is written into each topic and kept honest")
 
 
 def test_a_shared_directory_belongs_to_nobody():

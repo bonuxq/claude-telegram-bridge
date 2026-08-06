@@ -1142,6 +1142,13 @@ class Daemon:
                     msgs = [t("stop.again") + f"\n\n<i>{t('stop.await')}</i>"]
                     continue
                 return {}
+            if result.get("action") == "hold" and alarm:
+                # Waiting is exactly what the alarm is for: without it the
+                # session goes quiet here and the round of checking back that
+                # was running stops with it.
+                self.send(key, name, t("alarm.armed", minutes=alarm // 60),
+                          silent=True, session=sid)
+                return {"decision": "block", "reason": t("alarm.set", seconds=alarm)}
             if result.get("action") == "hold":
                 # Let the turn end without saying a word to the session: it set
                 # itself something to wake it, and the wait was the only thing
@@ -2165,6 +2172,15 @@ class Daemon:
         self.persist()
         log("topic", tid, "is gone; it will be created again on demand")
 
+    def switch_text(self):
+        """What the copy in a topic says: the mode and nothing else.
+
+        The full status names the live sessions, so it changes several times a
+        minute — and a line that never settles cannot be checked against what
+        is on screen without rewriting it every time.
+        """
+        return t("mode.status.away") if self.away else t("mode.status.atpc")
+
     def switch_in_topic(self, tid, text, markup):
         """Put the switch at the top of one topic, or bring it up to date.
 
@@ -2175,13 +2191,15 @@ class Daemon:
         """
         with self.lock:
             mid = (self.state.get("status_msgs") or {}).get(str(tid))
+            if mid and (self.state.get("switch_said") or {}).get(str(tid)) == text:
+                return          # already says this; nothing to ask Telegram
         if mid:
             try:
                 self.bot.edit_message(self.cfg["chat_id"], mid, text, markup=markup)
-                return
+                return self.remember_switch(tid, text)
             except TelegramError as e:
                 if "not modified" in (e.description or "").lower():
-                    return      # already says exactly this; not an error
+                    return self.remember_switch(tid, text)
                 if _thread_gone(e):
                     return self.forget_topic(tid)
                 if not _message_gone(e):
@@ -2197,6 +2215,27 @@ class Daemon:
             return
         with self.lock:
             self.state.setdefault("status_msgs", {})[str(tid)] = msg["message_id"]
+        self.remember_switch(tid, text)
+
+    def remember_switch(self, tid, text):
+        """Only what Telegram actually accepted, so a refusal is retried."""
+        with self.lock:
+            self.state.setdefault("switch_said", {})[str(tid)] = text
+
+    def switches_forever(self):
+        """Keep the buttons honest.
+
+        They were written once, when the mode changed, and a refusal there —
+        a rate limit, a hiccup — left a button that said the opposite of the
+        truth with nothing to correct it. Saying nothing costs nothing now,
+        so this can simply keep checking.
+        """
+        while True:
+            time.sleep(30)
+            try:
+                self.refresh_topic_switches()
+            except Exception as e:
+                log("switch refresh error:", type(e).__name__, e)
 
     def refresh_topic_switches(self, only=None):
         """The switch, pinned in every project topic rather than only the one.
@@ -2220,7 +2259,7 @@ class Daemon:
         with self.lock:
             topics = [tid for key, tid in self.state["topics"].items()
                       if tid and key not in service]
-        text, markup = self.status_text(), self.mode_markup()
+        text, markup = self.switch_text(), self.mode_markup()
         for tid in topics:
             if only is None or tid == only:
                 self.switch_in_topic(tid, text, markup)
@@ -2462,6 +2501,7 @@ def main():
                      daemon=True).start()
     threading.Thread(target=daemon.usage_poll_forever, daemon=True).start()
     threading.Thread(target=daemon.update_forever, daemon=True).start()
+    threading.Thread(target=daemon.switches_forever, daemon=True).start()
     log("background workers started (status, watchdog, digest, usage, updates)")
 
     log(f"listening on http://{cfg['host']}:{cfg['port']}")
