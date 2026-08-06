@@ -226,6 +226,35 @@ def test_task_reaches_a_turn_already_running():
     print("PASS a task typed mid-turn reaches the running session")
 
 
+def test_a_finished_turn_is_not_promised_a_next_step():
+    """The turn ended at the keyboard, then control came over. Nothing runs.
+
+    Reproduces the live sequence: Stop answered at 12:04:59 with nobody away,
+    away went on after it, and the task typed next was told a working session
+    would take it at its next step.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.state["topics"][key] = TOPIC
+    d.refresh_status = lambda: None
+    d.handle_event(evt("UserPromptSubmit"))
+    assert d.working_session(key), "a turn is running"
+    d.handle_event(evt("Stop"))          # ends at the PC: no waiter, no block
+    assert not d.working_session(key), "the turn is over"
+
+    d.set_away(True)
+    assert d.sessions["s1"]["parked"], "an unreachable session must say so"
+    assert any("⏸" in m["text"] for m in d.bot.sent), d.bot.sent
+
+    d.deliver_text("Тест 1", TOPIC,
+                   {"chat": {"id": -100}, "message_thread_id": TOPIC})
+    assert d.queue[key] == ["Тест 1"]
+    said = d.bot.sent[-1]["text"]
+    assert i18n.t("ack.queued") in said, said
+    assert i18n.t("ack.handoff") not in said, "promised a step that is not coming"
+    print("PASS an idle session is never promised a step it does not have")
+
+
 def test_idle_batch_says_nothing():
     """This runs on every batch of every turn; empty must stay free."""
     d = make_daemon("s.json", away=True)

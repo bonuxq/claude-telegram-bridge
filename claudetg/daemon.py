@@ -1093,6 +1093,41 @@ class Daemon:
                        and s.get("project") == key
                        for s in self.sessions.values())
 
+    def working_session(self, key):
+        """Is a turn of this project running right now?
+
+        live_session() answers a different question — whether a session could
+        take work at all — and one that finished its turn at the keyboard
+        answers yes to that while nothing whatsoever is running. Promising a
+        handoff there promises a step that is not coming.
+        """
+        with self.lock:
+            return any(self.session_alive(s) and not s.get("parked")
+                       and s.get("project") == key and s.get("turn_started")
+                       for s in self.sessions.values())
+
+    def park_idle(self):
+        """Park every session that finished its turn before the switch flipped.
+
+        Its Stop hook has already answered and gone, so nothing fires in it
+        again until somebody types in the editor: it cannot be reached from
+        the chat however alive it looks. Seen live — a turn ended at 12:04:59,
+        away went on a minute later, and the task typed after that was told a
+        working session would take it at its next step. There was no next step.
+
+        Returns the projects that just went out of reach, one entry each.
+        """
+        gone = {}
+        with self.lock:
+            waited = {w.session_id for w in self.waiters.values()}
+            for sid, session in self.sessions.items():
+                if (self.session_alive(session) and not session.get("parked")
+                        and not session.get("turn_started") and sid not in waited):
+                    session["parked"] = True
+                    gone.setdefault(session.get("project"),
+                                    session.get("name") or "")
+        return list(gone.items())
+
     def park(self, session_id):
         """The session stopped listening to the chat. Reversed by its next
         event, which only happens when it is used at the keyboard again."""
@@ -1360,9 +1395,10 @@ class Daemon:
         with self.lock:
             self.queue.setdefault(key, []).append(text)
         self.persist()
-        # A working session takes this at its next batch, so "queued" would
-        # read as a longer wait than it is.
-        self.ack(message, t("ack.handoff") if self.live_session(key)
+        # A turn that is running takes this at its next batch, so "queued"
+        # would read as a longer wait than it is. Anything else must not
+        # promise a step: an idle session has none until it is typed into.
+        self.ack(message, t("ack.handoff") if self.working_session(key)
                  else t("ack.queued"))
 
     def answer_by_text(self, waiter, text, message):
@@ -1758,6 +1794,13 @@ class Daemon:
             # Back at the keyboard: never leave a hook blocking on a chat you
             # are no longer reading. Control returns to VSCode immediately.
             self.release_all()
+        if value and not was_away:
+            # Handing control over does not reach back into a turn that has
+            # already ended. Say which sessions those are, at the one moment
+            # the answer is useful.
+            for key, name in self.park_idle():
+                if key:
+                    self.send(key, name, t("away.idle"), silent=True)
         self.refresh_status()
 
     def release_all(self):
