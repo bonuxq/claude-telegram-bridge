@@ -240,6 +240,21 @@ class Daemon:
                 ids.append(msg["message_id"])
             except TelegramError as e:
                 log("sendMessage failed:", e)
+                if _thread_gone(e) and thread is not None:
+                    # The topic was deleted in Telegram. Its id is still in
+                    # state, so every message for that project would be posted
+                    # into nothing: forget it, make a new one, and deliver.
+                    self.forget_topic(thread)
+                    thread = self.topic_for(project_key, project_name, session)
+                    try:
+                        msg = self.bot.send_message(
+                            self.cfg["chat_id"], body, thread_id=thread,
+                            markup=markup if last else None, silent=silent,
+                        )
+                        ids.append(msg["message_id"])
+                    except TelegramError as e2:
+                        log("retry in a fresh topic failed:", e2)
+                    continue
                 if e.code == 400 and "parse" in (e.description or "").lower():
                     # Never lose content to a formatting error: retry as plain.
                     try:
@@ -1976,6 +1991,21 @@ class Daemon:
             "callback_data": "mode",
         }]]}
 
+    def forget_topic(self, tid):
+        """Drop a topic that no longer exists, so a new one is made instead.
+
+        A deleted topic leaves its id behind in state, and everything aimed at
+        it disappears: with a topic per chat this is not hypothetical, since
+        the numbered threads of an earlier version are exactly the ones people
+        clear out of the group.
+        """
+        with self.lock:
+            for key in [k for k, v in self.state["topics"].items() if v == tid]:
+                del self.state["topics"][key]
+            (self.state.get("status_msgs") or {}).pop(str(tid), None)
+        self.persist()
+        log("topic", tid, "is gone; it will be created again on demand")
+
     def switch_in_topic(self, tid, text, markup):
         """Put the switch at the top of one topic, or bring it up to date."""
         with self.lock:
@@ -1992,6 +2022,9 @@ class Daemon:
             msg = self.bot.send_message(self.cfg["chat_id"], text, thread_id=tid,
                                         markup=markup, silent=True)
         except TelegramError as e:
+            if _thread_gone(e):
+                self.forget_topic(tid)
+                return
             log("topic switch failed:", e)
             return
         with self.lock:
@@ -2099,6 +2132,12 @@ def _describe_failure(data):
 def _strip_tags(text):
     import re
     return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+def _thread_gone(error):
+    """Telegram's way of saying the topic this was aimed at is not there."""
+    return (getattr(error, "code", None) == 400
+            and "thread not found" in (error.description or "").lower())
 
 
 def _join_tasks(items):

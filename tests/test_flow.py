@@ -236,6 +236,31 @@ def test_task_reaches_a_turn_already_running():
     print("PASS a task typed mid-turn reaches the running session")
 
 
+def test_a_deleted_topic_is_made_again():
+    """The numbered threads of an older version are what people clear out.
+
+    Their ids stay in state, so with a topic per chat the next chat to be
+    given that number would post into nothing at all.
+    """
+    d = make_daemon("s.json", away=False)
+    key = cfgmod.normalize(PROJECT)
+    d.linked = lambda: True
+    d.state["topics"][key] = 999          # a topic that no longer exists
+
+    def gone(chat_id, text, thread_id=None, markup=None, html=True, silent=False):
+        if thread_id == 999:
+            raise daemon_module.TelegramError("sendMessage", 400,
+                                              "Bad Request: message thread not found")
+        return FakeBot.send_message(d.bot, chat_id, text, thread_id=thread_id,
+                                    markup=markup, html=html, silent=silent)
+
+    d.bot.send_message = gone
+    ids = d.send(key, "TGbotClaude", "важное сообщение")
+    assert ids, "the message must survive the topic being deleted"
+    assert d.state["topics"][key] != 999, "the dead topic must not be kept"
+    print("PASS a message outlives the topic it was aimed at")
+
+
 def test_every_topic_carries_the_switch():
     """Handing control over must not mean going to look for the button."""
     d = make_daemon("s.json", away=False)
