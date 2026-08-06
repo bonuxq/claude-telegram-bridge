@@ -1114,9 +1114,20 @@ class Daemon:
             # happen inside one hook, and together they must stay under the
             # timeout Claude Code gives it.
             left = self.cfg["wait_seconds"] - (time.time() - began)
+            alarm = self.alarm_seconds()
+            if alarm:
+                # Check back rather than wait the whole four hours out: the
+                # session is only reachable while a turn of it is running, so
+                # coming back often is what keeps it reachable at all.
+                left = min(left, alarm)
             result = waiter.wait(max(1, left))
             self.unregister(waiter)
             if not result:
+                if alarm:
+                    self.send(key, name, t("alarm.armed", minutes=alarm // 60),
+                              silent=True, session=sid)
+                    return {"decision": "block",
+                            "reason": t("alarm.set", seconds=alarm)}
                 self.park(sid)
                 self.send(key, name, t("stop.parked") if self.can_spawn(key)
                           else t("stop.timeout"), silent=True, session=sid)
@@ -1322,6 +1333,19 @@ class Daemon:
                     time.sleep(0.1)
                 return          # somebody is at the desk: do not hold them up
             time.sleep(0.25)
+
+    def alarm_seconds(self):
+        """How long the session should sleep before checking back, or 0.
+
+        Nothing outside a session can start a turn in it. A wait that runs out
+        leaves it out of reach until somebody types at the keyboard — but a
+        session that starts something in the background is woken when that
+        thing finishes, and a turn it wakes into is a turn the chat can reach.
+        """
+        cfg = self.cfg.get("wake_alarm") or {}
+        if not cfg.get("enabled"):
+            return 0
+        return max(60, int(cfg.get("minutes") or 15) * 60)
 
     def working_session(self, key):
         """Is a turn of this project running right now?
@@ -1889,6 +1913,7 @@ class Daemon:
         "watchdog.enabled",
         "stop_grace.enabled",
         "session_topics.enabled",
+        "wake_alarm.enabled",
         "daily_digest.enabled",
         "git_summary",
         "log_when_present.stop",
@@ -1941,6 +1966,14 @@ class Daemon:
                     lang = enabled if enabled in i18n.LANGUAGES else None
                     self.cfg["language"] = lang
                     i18n.set_language(lang)
+                elif path == "wake_alarm.minutes":
+                    # A number, not a switch: zero is how the widget's little
+                    # box says "no alarm", so it turns the thing off too.
+                    minutes = max(0, min(240, int(enabled or 0)))
+                    section = dict(self.cfg.get("wake_alarm") or {})
+                    section["enabled"] = minutes > 0
+                    section["minutes"] = minutes or section.get("minutes", 15)
+                    self.cfg["wake_alarm"] = section
                 elif path in self.TOGGLES:
                     self.set_setting(path, enabled)
         cfgmod.save(self.cfg)
@@ -2063,8 +2096,11 @@ class Daemon:
             waiting = [{"project": w.project, "kind": w.kind}
                        for w in self.waiters.values()]
             queued = sum(len(v) for v in self.queue.values())
+        cfg = self.cfg.get("wake_alarm") or {}
         return {"away": self.away, "sessions": sessions,
-                "waiting": waiting, "queued": queued}
+                "waiting": waiting, "queued": queued,
+                "alarm": {"enabled": bool(cfg.get("enabled")),
+                          "minutes": int(cfg.get("minutes") or 15)}}
 
     def toggle_away(self):
         self.set_away(not self.away)

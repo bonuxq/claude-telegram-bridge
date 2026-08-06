@@ -43,6 +43,12 @@ DEFAULTS = {
     # different thread. The number belongs to the session id now and is never
     # reused, so a chat continued in the editor continues in its own topic.
     "session_topics": {"enabled": False},
+    # While away, let the session set itself an alarm instead of going quiet.
+    # Nothing outside a session can start a turn in it, so a wait that runs out
+    # leaves it unreachable until somebody types at the keyboard; a session
+    # that wakes itself is reachable again every time it does. Off by default:
+    # it costs a turn per interval, small but not nothing.
+    "wake_alarm": {"enabled": False, "minutes": 15},
     # Absolute project paths with custom names / extra_paths. With
     # auto_discover on these are optional overrides, not a whitelist.
     "projects": {},

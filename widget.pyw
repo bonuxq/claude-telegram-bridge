@@ -1127,6 +1127,7 @@ class Widget:
             ("cmd", t("menu.setup"), self.open_setup),
             ("cmd", t("menu.projects"), self.open_projects),
             ("cmd", t("menu.settings"), self.open_settings),
+            ("cmd", t("menu.alarm"), self.open_alarm),
             ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
             ("sub", t("menu.clickthrough"), through),
@@ -1661,6 +1662,53 @@ class Widget:
         win.geometry("")        # shrink to whatever the steps needed
         entry.focus_set()
 
+    def open_alarm(self):
+        """How long a waiting session sleeps before checking back.
+
+        A number rather than a switch, so it gets a box of its own instead of
+        a row among the things that are merely on or off. Zero turns it off,
+        which is the same answer as the switch in Features.
+        """
+        snapshot = self.request("/mode") or {}
+        alarm = snapshot.get("alarm") or {}
+        win = self.make_card(t("alarm.title"), width=420)
+        tk.Label(win, text=t("alarm.hint"), font=self.small, bg=SURFACE,
+                 fg=MUTED, anchor="w", padx=14, justify="left",
+                 wraplength=380).pack(fill="x", pady=(0, 8))
+
+        row = tk.Frame(win, bg=SURFACE)
+        row.pack(fill="x", padx=14)
+        tk.Label(row, text=t("alarm.minutes"), font=self.small, bg=SURFACE,
+                 fg=SECONDARY, anchor="w").pack(side="left")
+        entry = tk.Entry(row, font=self.small, bg=RAISED, fg=PRIMARY,
+                         insertbackground=PRIMARY, relief="flat", width=6,
+                         highlightthickness=1, highlightbackground=EDGE)
+        entry.pack(side="left", padx=(8, 0), ipady=3)
+        entry.insert(0, str(alarm.get("minutes", 15))
+                     if alarm.get("enabled") else "0")
+        note = tk.Label(win, font=self.small, bg=SURFACE, fg=MUTED, anchor="w",
+                        padx=14, justify="left", wraplength=380)
+        note.pack(fill="x", pady=(6, 0))
+
+        def apply():
+            try:
+                minutes = max(0, min(240, int(entry.get().strip() or 0)))
+            except ValueError:
+                note.configure(text=t("alarm.bad"), fg=WARNING)
+                return
+            self.request("/settings", {"settings": {"wake_alarm.minutes": minutes}})
+            note.configure(text=t("alarm.off") if minutes == 0
+                           else t("alarm.on", minutes=minutes), fg=GOOD)
+
+        button = tk.Label(win, text=t("alarm.apply"), font=self.small, bg=RAISED,
+                          fg=PRIMARY, cursor="hand2", padx=12, pady=5)
+        button.pack(anchor="w", padx=14, pady=(10, 6))
+        button.bind("<Button-1>", lambda e: apply())
+        button.bind("<Enter>", lambda e: button.configure(bg=RAISED_HI))
+        button.bind("<Leave>", lambda e: button.configure(bg=RAISED))
+        entry.bind("<Return>", lambda e: apply())
+        win.geometry("")        # shrink to fit
+
     def open_settings(self):
         snapshot = self.request("/settings")
         if snapshot is None:
@@ -1702,6 +1750,9 @@ class Widget:
                 kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting)))
         if queued:
             info.append(t("widget.queued", n=queued))
+        alarm = snapshot.get("alarm") or {}
+        if alarm.get("enabled"):
+            info.append(t("widget.alarm", minutes=alarm.get("minutes", 15)))
         # One line on the card; the full picture lives in the hover tip,
         # which drops the "Sessions:" prefix — it is plainly the session list.
         line = " · ".join(info)

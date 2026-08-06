@@ -261,6 +261,30 @@ def test_a_deleted_topic_is_made_again():
     print("PASS a message outlives the topic it was aimed at")
 
 
+def test_a_waiting_session_is_told_to_wake_itself():
+    """Nothing outside a session can start a turn in it.
+
+    So a wait that runs out leaves it out of reach until somebody types at the
+    keyboard. Told to sleep in the background, it is woken when that finishes,
+    and the turn it wakes into is a turn the chat can reach.
+    """
+    d = make_daemon("s.json", away=True)
+    d.state["topics"][cfgmod.normalize(PROJECT)] = TOPIC
+    d.cfg["wait_seconds"] = 300
+    d.cfg["wake_alarm"] = {"enabled": True, "minutes": 15}
+    d.alarm_seconds = lambda: 2      # the real floor is a minute; this is a test
+
+    start = time.time()
+    out = d.handle_event(evt("Stop"))
+    waited = time.time() - start
+    assert waited < 30, "the wait must be cut to the alarm, not run its course"
+    assert out.get("decision") == "block", out
+    assert "sleep 2" in out["reason"], out["reason"]
+    assert not d.sessions.get("s1", {}).get("parked"), "it is coming back, not parked"
+    assert any("⏰" in m["text"] for m in d.bot.sent), d.bot.sent
+    print("PASS a session with nobody answering sets itself an alarm")
+
+
 def test_the_panel_button_switches_instead_of_queueing():
     """Its label arrives as an ordinary message and must not become a task."""
     d = make_daemon("s.json", away=False)
