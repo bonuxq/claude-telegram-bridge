@@ -1029,6 +1029,13 @@ class Widget:
         self.fable_shown = tk.IntVar(value=int(saved.get("fable_shown", 0)))
         self.limits_shown = tk.IntVar(value=int(saved.get("limits_shown", 1)))
         self.last_usage = None
+        # -- alarm, on a line of its own ----------------------------------
+        # It used to be the last word of the session list, which is cut at 48
+        # characters — so the alarm was the part that got cut. Packed only
+        # while one is set, above the limits, where nothing else moves.
+        self.alarm_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
+                                    fg=SECONDARY, anchor="w", padx=14)
+
         limits_bar = tk.Frame(self.root, bg=SURFACE)
         limits_bar.pack(fill="x", padx=14, pady=(6, 0))
         self.limits_tab = ShadowText(limits_bar, small)
@@ -1750,9 +1757,7 @@ class Widget:
                 kinds.get(w.get("kind"), w.get("kind", "?")) for w in waiting)))
         if queued:
             info.append(t("widget.queued", n=queued))
-        alarm = snapshot.get("alarm") or {}
-        if alarm.get("enabled"):
-            info.append(t("widget.alarm", minutes=alarm.get("minutes", 15)))
+        self.show_alarm(snapshot.get("alarm") or {})
         # One line on the card; the full picture lives in the hover tip,
         # which drops the "Sessions:" prefix — it is plainly the session list.
         line = " · ".join(info)
@@ -1908,6 +1913,22 @@ class Widget:
         self.limits_shown.set(0 if self.limits_shown.get() else 1)
         self.layout_limits()
         self.save_pos()
+
+    def show_alarm(self, alarm):
+        """Its own row while an alarm is set, and no row at all when none is."""
+        wanted = bool(alarm.get("enabled"))
+        shown = bool(self.alarm_label.winfo_ismapped())
+        if wanted:
+            self.alarm_label.configure(
+                text=t("widget.alarm", minutes=alarm.get("minutes", 15)))
+        if wanted == shown:
+            return
+        if wanted:
+            self.alarm_label.pack(fill="x", pady=(4, 0), before=self.limits_bar)
+        else:
+            self.alarm_label.pack_forget()
+        self.root.geometry("")                  # the card grew or shrank
+        self.root.after(50, self.place_punch)   # the capsule may have moved
 
     def layout_limits(self):
         """Fold the meters — and the Fable row inside them — in or out.
