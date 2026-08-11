@@ -760,8 +760,11 @@ class PopupMenu:
         # No highlight border: it is a rectangle, and the rounded region cuts
         # its corners off. The outline is drawn by a ring window instead.
         win.configure(bg=SURFACE, highlightthickness=0)
-        win.bind("<Enter>", lambda e, w=win: self._on_enter(w), add="+")
-        win.bind("<Leave>", lambda e: self._schedule_hide(), add="+")
+        # Both take the event optionally: tkinter has been seen calling these
+        # back without one while the menu was going away, and the TypeError
+        # landed in widget.log as if something had broken.
+        win.bind("<Enter>", lambda _e=None, w=win: self._on_enter(w), add="+")
+        win.bind("<Leave>", lambda _e=None: self._schedule_hide(), add="+")
         for item in items:
             self._row(win, item)
         win.geometry(f"+{x}+{y}")
