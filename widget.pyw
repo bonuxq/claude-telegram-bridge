@@ -32,6 +32,7 @@ ROOT = (os.path.dirname(os.path.abspath(sys.executable))
 sys.path.insert(0, ROOT)
 from claudetg import i18n, paths, usage  # noqa: E402  (needs ROOT on the path)
 from claudetg.i18n import t  # noqa: E402
+from claudetg.version import __version__  # noqa: E402
 
 CONFIG = os.path.join(ROOT, "config.json")
 POS_FILE = os.path.join(ROOT, "widget.json")
@@ -223,6 +224,35 @@ def work_area(x, y):
     except (OSError, AttributeError, ValueError):
         pass
     return 0, 0, 1920, 1080
+
+
+def rect_on_screen(x, y, w, h):
+    """Is any part of this rectangle still on a monitor that exists?
+
+    A card left on a second display comes back — or stays, if the display is
+    unplugged while it runs — at coordinates the desktop no longer covers, and
+    Windows draws it nowhere rather than moving it home. MonitorFromRect
+    answers for the real arrangement: NULL means every display has moved out
+    from under the rectangle.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromRect.restype = ctypes.c_void_p     # or a handle
+        rect = RECT(int(x), int(y),                          # truncates to 0
+                    int(x) + max(int(w), 1), int(y) + max(int(h), 1))
+        return bool(user32.MonitorFromRect(ctypes.byref(rect), 0))   # TONULL
+    except (OSError, AttributeError, ValueError):
+        return True         # not Windows: take the saved spot at its word
+
+
+DEFAULT_ALPHA = 0.8
+HOME_MARGIN = 40           # the default corner, in from the work area
+
+
+def home_spot():
+    """The card's home corner, just inside the primary monitor's work area."""
+    left, top, _right, _bottom = work_area(0, 0)
+    return left + HOME_MARGIN, top + HOME_MARGIN
 
 
 def round_window(win, radius=14):
@@ -622,7 +652,10 @@ class Tray(threading.Thread):
         nid.uFlags = 0x7                      # MESSAGE | ICON | TIP
         nid.uCallbackMessage = self.WM_TRAY
         nid.hIcon = self.hicon
-        nid.szTip = "Claude ↔ Telegram"
+        # The version rides along here: the tray tip is the one label that is
+        # readable without opening anything, and "which build is this?" is the
+        # first question of every bug report.
+        nid.szTip = f"Claude ↔ Telegram v{__version__}"
         return nid
 
     def set_percent(self, percent, color):
@@ -977,8 +1010,9 @@ class Widget:
         # No highlight border: it is a rectangle, and the rounded region cuts
         # its corners off. The outline is drawn by a ring window instead.
         self.root.configure(bg=SURFACE, highlightthickness=0)
-        self.root.geometry(f"+{int(saved.get('x', 40))}+{int(saved.get('y', 40))}")
-        self.alpha_var = tk.DoubleVar(value=float(saved.get("alpha", 0.8)))
+        self.root.geometry("+%d+%d" % self.saved_spot(saved))
+        self.alpha_var = tk.DoubleVar(value=float(saved.get("alpha",
+                                                           DEFAULT_ALPHA)))
         self.root.attributes("-alpha", self.alpha_var.get())
         self.auto_var = tk.IntVar(value=int(saved.get("auto_away_seconds", 300)))
         self.auto_away_active = False
@@ -1011,6 +1045,9 @@ class Widget:
         self.gear.bind("<Button-1>", self.open_menu)
         self.gear.bind("<Enter>", lambda e: self.gear.configure(fg=PRIMARY))
         self.gear.bind("<Leave>", lambda e: self.gear.configure(fg=MUTED))
+        self.gear_tip = Tooltip(self.gear,
+                                lambda: t("widget.gear", version=__version__),
+                                small)
         # Right gap of the gear is 2+10=12px; mirror it on its left.
         # Tiny requested width: fill/expand stretches it to the real room,
         # while the meters below dictate the window's width.
@@ -1144,6 +1181,7 @@ class Widget:
             ("sub", t("menu.autoaway"), auto),
             ("sub", t("menu.language"), langs),
             ("sep",),
+            ("cmd", t("menu.reset"), self.reset_placement),
             ("cmd", t("menu.tray"), self.hide_to_tray),
             ("cmd", t("menu.close"), self.close),
         ]
@@ -1355,6 +1393,7 @@ class Widget:
         # Cheap, and the only way the stand-in survives a moved or resized
         # card: in click-through mode the card cannot be dragged anyway, but
         # the Fable row folding in and out does move the capsule.
+        self.keep_on_screen()
         self.place_edge()
         self.place_punch()
         self.root.after(POLL_MS, self.poll)
@@ -2129,6 +2168,64 @@ class Widget:
                 return json.load(f)
         except (OSError, ValueError):
             return {}
+
+    @staticmethod
+    def saved_spot(saved):
+        """Where to open: the remembered corner, unless it is off the desktop.
+
+        The card's own size is not known yet at this point, so the corner is
+        what gets checked; anything worse than that is caught by
+        `keep_on_screen` once the card has been laid out.
+        """
+        try:
+            x, y = int(saved["x"]), int(saved["y"])
+        except (KeyError, TypeError, ValueError):
+            return home_spot()
+        return (x, y) if rect_on_screen(x, y, 1, 1) else home_spot()
+
+    def keep_on_screen(self):
+        """Pull the card back onto a monitor that still exists.
+
+        Checked on every poll rather than once at startup: a display can be
+        unplugged while the widget is running, and a card that is drawn
+        nowhere cannot be dragged back. Clamping into the nearest monitor's
+        work area keeps the corner it was parked at — a card off to the right
+        of a display that is gone lands at the right edge of the one left.
+        """
+        if self.drag:
+            return              # a drag across the seam is not a lost card
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        if w <= 1 or rect_on_screen(x, y, w, h):
+            return
+        left, top, right, bottom = work_area(x, y)
+        self.root.geometry(f"+{max(left, min(x, right - w))}"
+                           f"+{max(top, min(y, bottom - h))}")
+        self.place_edge()
+        self.place_punch()
+        self.save_pos()
+
+    def reset_placement(self):
+        """Position, transparency and click-through back to their defaults.
+
+        The one door out of a card that cannot be reached: parked on a monitor
+        that is no longer plugged in, faded to where it cannot be found, or
+        passing every click through to what is underneath it. Reachable from
+        the tray menu, which needs none of that to work.
+        """
+        self.through_var.set(0)
+        self.apply_click_through()
+        self.alpha_var.set(DEFAULT_ALPHA)
+        self.set_alpha()
+        if self.root.state() == "withdrawn":
+            self.root.deiconify()
+            # Some WMs drop these on deiconify; reassert both.
+            self.root.overrideredirect(True)
+            self.root.attributes("-topmost", True)
+        self.root.geometry("+%d+%d" % home_spot())
+        self.place_edge()
+        self.place_punch()
+        self.save_pos()
 
     def save_pos(self):
         try:

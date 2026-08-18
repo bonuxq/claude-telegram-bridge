@@ -121,7 +121,8 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   the group is bound and whether the hooks are installed, plus the setup
   steps. Opens by itself until the bridge is configured.
 - **Menu** — Telegram, Projects, Features (every daemon toggle, applied
-  instantly), transparency presets, click-through, auto-away, hide-to-tray.
+  instantly), transparency presets, click-through, auto-away, reset the
+  widget, hide-to-tray. The gear's tooltip says which version is running.
 - **Click-through** — the card stops catching the mouse, so it can sit over
   your editor without being in the way. The presence capsule and the gear
   stay live: each gets a solid stand-in window, with a matching hole cut in
@@ -130,8 +131,14 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   full red past 90% of either weekly one, and the capsule follows the card.
   The session meter has a finer ramp: yellow at 60%, orange through 80%, red
   at 90%.
+- **Reset the widget's position** — a card parked on a monitor that is no
+  longer plugged in comes back on its own, at startup and while running.
+  The menu entry is the manual way out, and it also puts transparency and
+  click-through back to their defaults — it is reachable from the tray, so
+  it works even when the card itself cannot be clicked or found.
 - **Tray icon** — draws the session percentage in the same colour as its
-  meter, so the number is readable with the card hidden.
+  meter, so the number is readable with the card hidden. Its tooltip carries
+  the version.
 - **Auto-away** — after N minutes of system-wide idle the bridge flips to
   away; only a **key press** flips it back (a nudged mouse does not).
   Manual switches are never undone automatically.
