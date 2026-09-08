@@ -1038,6 +1038,10 @@ class Widget:
         self.alpha_var = tk.DoubleVar(value=float(saved.get("alpha",
                                                            DEFAULT_ALPHA)))
         self.scale_var = tk.DoubleVar(value=self.scale)
+        # Which meter the tray icon draws. One number fits on a 16px icon,
+        # and which one matters depends on what you are burning through.
+        self.tray_var = tk.StringVar(value=str(saved.get("tray_meter",
+                                                         "five_hour")))
         self.root.attributes("-alpha", self.alpha_var.get())
         self.auto_var = tk.IntVar(value=int(saved.get("auto_away_seconds", 300)))
         self.auto_away_active = False
@@ -1046,6 +1050,7 @@ class Widget:
         self.edge = None           # the card's outline, drawn as a ring
         self.overlays = []         # cards that must stay above them
         self.tray_percent = None                # last value drawn on the icon
+        self.spot_saved = None                  # position last written down
         self.fable_pct = None                   # last Fable reading, for the tab
         self.fable_alarm = False                # Fable spent: unfold regardless
         try:
@@ -1057,8 +1062,13 @@ class Widget:
         small = tkfont.Font(family="Segoe UI", size=self.pt(8))
         value = tkfont.Font(family="Segoe UI", size=self.pt(9), weight="bold")
         gear_font = tkfont.Font(family="Segoe UI", size=self.pt(12))
-        self.small = small
-        self.bold = bold
+        # Scaling shrinks the card, not the things that open on top of it: a
+        # menu at 70% is a menu you cannot read, and the point of a small
+        # card is to take less room while it sits there, not to make every
+        # window it opens harder to use. `self.small` / `self.bold` are the
+        # unscaled pair the menus, cards and tooltips are built from.
+        self.small = tkfont.Font(family="Segoe UI", size=8)
+        self.bold = tkfont.Font(family="Segoe UI", size=11, weight="bold")
 
         # -- top row: presence capsule stretched up to the gear -----------
         top = self.top = tk.Frame(self.root, bg=SURFACE)
@@ -1077,7 +1087,8 @@ class Widget:
         self.toggle.bind("<Configure>", lambda e: self.paint_toggle())
 
         self.lang_var = tk.StringVar(value=cfg.get("language") or "auto")
-        self.toggle_tip = Tooltip(self.toggle, lambda: t(self.theme["label"]), small)
+        self.toggle_tip = Tooltip(self.toggle, lambda: t(self.theme["label"]),
+                                  self.small)
 
         # Named: it goes and comes back with the presence row above it.
         self.top_rule = tk.Frame(self.root, height=1, bg=HAIRLINE)
@@ -1152,8 +1163,8 @@ class Widget:
                 self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
                                     "ramp": ramp, "section": section}
                 self.tips[key] = t(NO_DATA_TIP)
-                Tooltip(bar, lambda k=key: self.tips[k], small)
-                Tooltip(pct, lambda k=key: self.tips[k], small)
+                Tooltip(bar, lambda k=key: self.tips[k], self.small)
+                Tooltip(pct, lambda k=key: self.tips[k], self.small)
                 row += 1
         # Named, because it is what the limits block is packed in front of
         # once the block has been hidden and has to come back — and packed
@@ -1171,12 +1182,13 @@ class Widget:
         self.info_label = tk.Label(info_row, text="", font=small, bg=SURFACE,
                                    fg=MUTED, anchor="w", padx=self.px(14))
         self.info_label.pack(side="left", fill="x", expand=True)
-        self.gear = self.make_gear(info_row, gear_font, small)
+        self.gear = self.make_gear(info_row, gear_font)
         self.gear.pack(side="right", padx=(self.px(6), self.px(12)))
-        self.info_tip = Tooltip(self.info_label, lambda: self.info_full, small)
+        self.info_tip = Tooltip(self.info_label, lambda: self.info_full,
+                                self.small)
 
         # -- borderless plumbing: menu everywhere, drag on passive parts --
-        self.pop = PopupMenu(self.root, small)
+        self.pop = PopupMenu(self.root, self.small)
         for area in (self.root, top, self.info_label, meters,
                      *[m[part] for m in self.meters.values()
                        for part in ("bar", "pct", "caption")]):
@@ -1221,6 +1233,11 @@ class Widget:
         scale = [("radio", f"{int(step * 100)}%", self.scale_var, step,
                   lambda step=step: self.set_scale(step))
                  for step in (0.7, 0.8, 0.9, 1.0, 1.2)]
+        tray = [("radio", label, self.tray_var, key, self.set_tray_meter)
+                for key, label in (("five_hour", t("widget.meter.five_hour")),
+                                   ("seven_day", t("widget.meter.seven_day")),
+                                   ("fable", t("widget.meter.fable")),
+                                   ("codex", SECTION_NAMES["codex"]))]
         # Everything that only makes sense with a chat on the other end goes
         # when Telegram does — including auto-away, which switches a mode that
         # no longer has anywhere to hand control to. The setup screen stays:
@@ -1236,6 +1253,7 @@ class Widget:
             ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
             ("sub", t("menu.scale"), scale),
+            ("sub", t("menu.traymeter"), tray),
             ("sub", t("menu.clickthrough"), through),
             *presence,
             ("sub", t("menu.language"), langs),
@@ -1453,6 +1471,7 @@ class Widget:
         # card: in click-through mode the card cannot be dragged anyway, but
         # the Fable row folding in and out does move the capsule.
         self.keep_on_screen()
+        self.remember_spot()
         self.place_edge()
         self.place_punch()
         self.root.after(POLL_MS, self.poll)
@@ -1562,7 +1581,7 @@ class Widget:
         win.lift()
         return win
 
-    def make_gear(self, parent, font, small):
+    def make_gear(self, parent, font):
         """The menu button. Built twice: once in the presence row, once in the
         first section heading — with Telegram off the presence row goes, and a
         row left over with nothing but a gear in it reads as a mistake. Only
@@ -1572,7 +1591,7 @@ class Widget:
         gear.bind("<Button-1>", self.open_menu)
         gear.bind("<Enter>", lambda e: gear.configure(fg=PRIMARY))
         gear.bind("<Leave>", lambda e: gear.configure(fg=MUTED))
-        Tooltip(gear, lambda: t("widget.gear", version=__version__), small)
+        Tooltip(gear, lambda: t("widget.gear", version=__version__), self.small)
         return gear
 
     def place_presence_row(self):
@@ -2094,6 +2113,15 @@ class Widget:
         self.layout_limits()
         self.save_pos()
 
+    def set_tray_meter(self):
+        """Redraw the icon from the newly chosen meter at once, rather than
+        leaving the old number sitting there until this one happens to move."""
+        self.tray_percent = None
+        limits = (self.last_usage or {}).get("rate_limits") or {}
+        key = self.tray_var.get()
+        self.show_in_tray(self.window_for(limits, key).get("used_percentage"))
+        self.save_pos()
+
     def toggle_section(self, name):
         """Fold one vendor's rows away. Each keeps its own preference, so
         collapsing Claude does not take Codex with it."""
@@ -2313,7 +2341,7 @@ class Widget:
         self.follow_fable(shown.get("fable"))
         for key, widgets in self.meters.items():
             self.draw_meter(widgets["bar"], shown.get(key), widgets["ramp"])
-        self.show_session_in_tray(shown.get("five_hour"))
+        self.show_in_tray(shown.get(self.tray_var.get()))
 
     def follow_fable(self, percent):
         """Keep the tab colour and the forced unfold in step with the pool."""
@@ -2325,18 +2353,23 @@ class Widget:
         else:
             self.paint_tabs()
 
-    def show_session_in_tray(self, percent):
-        """The session percentage on the tray icon, so the number is readable
-        with the card hidden. Redrawn only when the rounded value moves."""
+    def show_in_tray(self, percent):
+        """The chosen meter's percentage on the tray icon, so one number is
+        readable with the card hidden. Redrawn only when it actually moves."""
         if percent is None:
             return
         rounded = int(round(percent))
         if rounded == self.tray_percent:
             return
         self.tray_percent = rounded
-        # The same ramp as the session meter, so the icon and the bar never
+        # The meter's own ramp, so the icon and the bar it stands for never
         # disagree about how bad things are.
-        self.tray.set_percent(rounded, session_color(percent))
+        # `.get`, not `[]`: the key comes out of widget.json, and a file
+        # written by a later version can name a meter this one has not
+        # got — worth a plain colour, not a crash on every poll.
+        row = self.meters.get(self.tray_var.get()) or {}
+        ramp = row.get("ramp") or severity
+        self.tray.set_percent(rounded, ramp(percent))
 
     def draw_meter(self, canvas, percent, ramp=None):
         """Capsule meter: the ramp picks the fill, track = its own quiet step."""
@@ -2431,6 +2464,38 @@ class Widget:
             return home_spot()
         return (x, y) if rect_on_screen(x, y, 1, 1) else home_spot()
 
+    def spot_now(self):
+        """Where the card actually is, asked of Windows rather than of Tk.
+
+        Tk only knows about moves it made itself. A window that Windows moved
+        — a display that came back at a different resolution, a snap, a
+        restore from the tray — leaves winfo_x() answering with where the
+        card used to be, and that is the position that got written down.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            rect = RECT()
+            if user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+                return rect.left, rect.top
+        except (OSError, AttributeError, tk.TclError):
+            pass
+        return self.root.winfo_x(), self.root.winfo_y()
+
+    def remember_spot(self):
+        """Write the position down whenever it changes, not only when a drag
+        ends.
+
+        A widget that is killed rather than closed never gets to save
+        anything — an installer stopping it, a reboot, a crash — and came
+        back at whatever spot the last deliberate save happened to hold.
+        Checked on the poll, so any move is written within seconds.
+        """
+        if self.drag:
+            return              # mid-drag: the release will do it
+        if self.spot_now() != self.spot_saved:
+            self.save_pos()
+
     def keep_on_screen(self):
         """Pull the card back onto a monitor that still exists.
 
@@ -2476,11 +2541,13 @@ class Widget:
         self.save_pos()
 
     def save_pos(self):
+        self.spot_saved = self.spot_now()
         try:
             with open(POS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                json.dump({"x": self.spot_saved[0], "y": self.spot_saved[1],
                            "alpha": self.alpha_var.get(),
                            "scale": self.scale,
+                           "tray_meter": self.tray_var.get(),
                            "auto_away_seconds": self.auto_var.get(),
                            "fable_shown": self.fable_shown.get(),
                            "claude_shown": self.claude_shown.get(),

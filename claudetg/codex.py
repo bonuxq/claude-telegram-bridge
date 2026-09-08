@@ -44,6 +44,11 @@ MIN_INTERVAL = 15
 # Older than this and it is not a limit any more, it is a souvenir: better no
 # row at all than a fortnight-old percentage presented as current.
 MAX_AGE = 14 * 86400
+# The plan's own pool — the number Codex's own UI shows. Everything else is
+# `codex_<model>`: a per-model allowance that sits at zero unless that model
+# is the one being used.
+MAIN_POOL = "codex"
+WEEK_MINUTES = 10080
 
 _cache = {"at": 0.0, "key": None, "reading": None}
 
@@ -137,12 +142,35 @@ def tail_lines(path, size):
     return lines[1:] if end > size else lines
 
 
-def limit_in(lines):
-    """The last usable rate_limits record in these lines, or None.
+def weekly_window(limits):
+    """The weekly window of one pool, whichever slot it arrived in.
 
-    "Usable" rules out the pools that report themselves without a window —
-    `premium` sends `primary: null` — which is not a limit anyone can watch.
+    Which slot holds which window is not fixed: the plan pool sends its week
+    as `primary` and nothing else, while a per-model pool sends a 5-hour
+    window there and the week in `secondary`. The length says what a window
+    is; its slot does not. Anything without a percentage is not a limit
+    anyone can watch — `premium` sends `primary: null` — and is skipped.
     """
+    windows = [w for w in (limits.get("primary"), limits.get("secondary"))
+               if isinstance(w, dict) and w.get("used_percent") is not None]
+    weekly = [w for w in windows if w.get("window_minutes") == WEEK_MINUTES]
+    if weekly:
+        return weekly[0]
+    # No week in this pool: the longest window it does have is the closest
+    # thing to one, and reporting nothing would be worse.
+    return max(windows, key=lambda w: w.get("window_minutes") or 0, default=None)
+
+
+def limit_in(lines):
+    """The newest usable reading in these lines, preferring the plan's pool.
+
+    Codex reports every pool it knows about, one record each, within the same
+    second. A per-model pool that has never been touched reports zero, and
+    one of those landing last is not a reason to say the plan is empty — so
+    the main pool wins, and the rest are only a fallback for the day this
+    format changes again.
+    """
+    fallback = None
     for line in reversed(lines):
         if "rate_limits" not in line:
             continue
@@ -150,30 +178,42 @@ def limit_in(lines):
             record = json.loads(line)
         except ValueError:
             continue            # truncated or half-written: keep looking back
-        limits = (record.get("payload") or {}).get("rate_limits")
-        window = (limits or {}).get("primary")
-        if not isinstance(window, dict) or window.get("used_percent") is None:
+        limits = (record.get("payload") or {}).get("rate_limits") or {}
+        window = weekly_window(limits)
+        if window is None:
             continue
-        return {"used_percentage": float(window["used_percent"]),
-                "resets_at": window.get("resets_at"),
-                "window_minutes": window.get("window_minutes"),
-                "plan_type": (limits or {}).get("plan_type"),
-                "captured_at": _epoch(record.get("timestamp"))}
-    return None
+        reading = {"used_percentage": float(window["used_percent"]),
+                   "resets_at": window.get("resets_at"),
+                   "window_minutes": window.get("window_minutes"),
+                   "pool": limits.get("limit_id"),
+                   "plan_type": limits.get("plan_type"),
+                   "captured_at": _epoch(record.get("timestamp"))}
+        if limits.get("limit_id") == MAIN_POOL:
+            return reading
+        if fallback is None:
+            fallback = reading
+    return fallback
 
 
 def from_file(path):
-    """The newest reading in one rollout: a short tail first, then a long one."""
+    """The newest reading in one rollout: a short tail first, then a long one.
+
+    A per-model pool is written as often as the plan's own, so a short tail
+    can easily hold nothing but those. Finding one is a reason to dig deeper,
+    not an answer — but it is kept, in case the deeper read finds no more.
+    """
+    reading = None
     for size in (TAIL, DEEP_TAIL):
-        reading = limit_in(tail_lines(path, size))
-        if reading:
-            return reading
+        found = limit_in(tail_lines(path, size))
+        if found and found.get("pool") == MAIN_POOL:
+            return found
+        reading = reading or found
         try:
             if os.path.getsize(path) <= size:
                 break           # the whole file was read already; digging is moot
         except OSError:
             break
-    return None
+    return reading
 
 
 def read(home=None, now=None):
@@ -197,9 +237,11 @@ def read(home=None, now=None):
 
     reading = None
     for path, _mtime, _size in candidates:
-        reading = from_file(path)
-        if reading:
-            break
+        found = from_file(path)
+        if found and found.get("pool") == MAIN_POOL:
+            reading = found
+            break               # the plan's own pool: nothing beats it
+        reading = reading or found
     if reading:
         captured = reading.get("captured_at") or 0
         resets = reading.get("resets_at") or 0

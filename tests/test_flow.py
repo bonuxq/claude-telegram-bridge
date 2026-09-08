@@ -2183,6 +2183,69 @@ def _codex_home(name, records):
     return home
 
 
+def test_codex_prefers_the_plans_own_pool():
+    now = time.time()
+    week = now + 5 * 86400
+    # Codex writes one record per pool within the same second. The per-model
+    # pool lands last and reads zero until that model is used; taking it would
+    # report an empty plan while the plan is two thirds spent.
+    home = _codex_home("pools", [
+        {"timestamp": _stamp(now - 60), "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "rate_limits": {"limit_id": "codex", "plan_type": "pro",
+                                     "primary": {"used_percent": 66.0,
+                                                 "window_minutes": 10080,
+                                                 "resets_at": week},
+                                     "secondary": None}}},
+        {"timestamp": _stamp(now - 59), "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "rate_limits": {"limit_id": "codex_bengalfox",
+                                     "limit_name": "GPT-5.3-Codex-Spark",
+                                     "plan_type": "pro",
+                                     "primary": {"used_percent": 0.0,
+                                                 "window_minutes": 300,
+                                                 "resets_at": now + 3600},
+                                     "secondary": {"used_percent": 0.0,
+                                                   "window_minutes": 10080,
+                                                   "resets_at": week}}}},
+    ])
+    try:
+        codex.forget()
+        reading = codex.read(home=home, now=now)
+        assert reading["used_percentage"] == 66.0, reading
+        assert reading["pool"] == "codex", reading
+        assert reading["window_minutes"] == 10080, reading
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS the Codex reading comes from the plan's pool, not a model's")
+
+
+def test_codex_weekly_window_whichever_slot_it_is_in():
+    now = time.time()
+    week = now + 5 * 86400
+    # A pool that has both sends the 5-hour window as `primary`. The row is a
+    # weekly one, so the length decides, not the slot.
+    home = _codex_home("slots", [
+        {"timestamp": _stamp(now - 30), "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "rate_limits": {"limit_id": "codex", "plan_type": "pro",
+                                     "primary": {"used_percent": 4.0,
+                                                 "window_minutes": 300,
+                                                 "resets_at": now + 3600},
+                                     "secondary": {"used_percent": 41.0,
+                                                   "window_minutes": 10080,
+                                                   "resets_at": week}}}},
+    ])
+    try:
+        codex.forget()
+        reading = codex.read(home=home, now=now)
+        assert reading["used_percentage"] == 41.0, reading
+        assert reading["window_minutes"] == 10080, reading
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS the weekly window is found by its length, not by its slot")
+
+
 def test_codex_limit_is_the_newest_record_that_has_one():
     now = time.time()
     resets = now + 5 * 86400

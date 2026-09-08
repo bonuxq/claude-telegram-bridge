@@ -30,7 +30,7 @@ bridge is Python standard library.
   using the Claude Code token — that is what fills the meters on most setups.
 - **A desktop widget**: borderless always-on-top card with a presence toggle,
   usage meters grouped per vendor (**Claude**: session, week, Fable —
-  **Codex**: week), a tray icon showing the session percentage, transparency
+  **Codex**: week), a tray icon showing the meter of your choice, transparency
   control, click-through mode and auto-away on keyboard idle. The card turns
   red on its own when a window is nearly spent, and Telegram can be switched
   off entirely to leave a pure limits monitor.
@@ -128,9 +128,11 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
 - **Codex limits** come from the logs Codex already writes
   (`~/.codex/sessions/**/rollout-*.jsonl`, the `token_count` events): no
   network, no credentials, and the tail of the file is read only when it has
-  grown. Codex reports a weekly window and nothing else, so that is the one
-  row. A window that reset since the last reading shows "—" rather than a
-  guess at zero.
+  grown. Codex reports one pool per model plus the plan's own; the row is
+  the plan's weekly window, found by its length rather than by which slot it
+  arrived in, because an untouched per-model pool reads zero and is written
+  just as often. A window that reset since the last reading shows "—" rather
+  than a guess at zero.
 - **Telegram screen** — the master switch, the token field, what Telegram
   makes of it, whether the group is bound and whether the hooks are
   installed, plus the setup steps. Opens by itself until the bridge is
@@ -164,8 +166,9 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   for a widget that has to sit in a corner without taking the corner over.
   A Tk font is measured when the widget is built, so the card restarts
   itself to redraw at the new size — the same way the language switch does.
-- **Tray icon** — draws the session percentage in the same colour as its
-  meter, so the number is readable with the card hidden. Its tooltip carries
+- **Tray icon** — draws one meter's percentage in that meter's own colour,
+  so the number is readable with the card hidden. Which meter is a menu
+  choice (**Tray shows**): session, week, Fable or Codex. Its tooltip carries
   the version.
 - **Auto-away** — after N minutes of system-wide idle the bridge flips to
   away; only a **key press** flips it back (a nudged mouse does not).
