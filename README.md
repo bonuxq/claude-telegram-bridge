@@ -145,8 +145,8 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   starts off; an install that already has a token and a group keeps working,
   because a missing switch means "on if it is configured".
 - **Menu** — Telegram, Projects, Features (every daemon toggle, applied
-  instantly), transparency presets, click-through, auto-away, reset the
-  widget, hide-to-tray. The gear's tooltip says which version is running.
+  instantly), transparency presets, scale, click-through, auto-away, reset
+  the widget, hide-to-tray. The gear's tooltip says which version is running.
 - **Click-through** — the card stops catching the mouse, so it can sit over
   your editor without being in the way. The presence capsule and the gear
   stay live: each gets a solid stand-in window, with a matching hole cut in
@@ -160,6 +160,10 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   The menu entry is the manual way out, and it also puts transparency and
   click-through back to their defaults — it is reachable from the tray, so
   it works even when the card itself cannot be clicked or found.
+- **Scale** — 70% to 120% of the card, fonts, meters and padding together,
+  for a widget that has to sit in a corner without taking the corner over.
+  A Tk font is measured when the widget is built, so the card restarts
+  itself to redraw at the new size — the same way the language switch does.
 - **Tray icon** — draws the session percentage in the same colour as its
   meter, so the number is readable with the card hidden. Its tooltip carries
   the version.

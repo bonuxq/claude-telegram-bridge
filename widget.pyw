@@ -1021,6 +1021,11 @@ class Widget:
         self.surface = SURFACE      # the card's current background, alarm aside
 
         saved = self.load_saved()
+        # Every size on the card goes through this: the fonts, the meters,
+        # the padding. Applied at startup rather than live, because a Tk
+        # font is measured once per widget — a restart is the honest redraw,
+        # the same way the language switch does it.
+        self.scale = self.saved_scale(saved)
         self.root = tk.Tk()
         self.root.title("Claude ↔ Telegram")
         self.root.report_callback_exception = self.report_callback_exception
@@ -1032,6 +1037,7 @@ class Widget:
         self.root.geometry("+%d+%d" % self.saved_spot(saved))
         self.alpha_var = tk.DoubleVar(value=float(saved.get("alpha",
                                                            DEFAULT_ALPHA)))
+        self.scale_var = tk.DoubleVar(value=self.scale)
         self.root.attributes("-alpha", self.alpha_var.get())
         self.auto_var = tk.IntVar(value=int(saved.get("auto_away_seconds", 300)))
         self.auto_away_active = False
@@ -1047,21 +1053,22 @@ class Widget:
         except tk.TclError:
             pass
 
-        bold = tkfont.Font(family="Segoe UI", size=11, weight="bold")
-        small = tkfont.Font(family="Segoe UI", size=8)
-        value = tkfont.Font(family="Segoe UI", size=9, weight="bold")
-        gear_font = tkfont.Font(family="Segoe UI", size=12)
+        bold = tkfont.Font(family="Segoe UI", size=self.pt(11), weight="bold")
+        small = tkfont.Font(family="Segoe UI", size=self.pt(8))
+        value = tkfont.Font(family="Segoe UI", size=self.pt(9), weight="bold")
+        gear_font = tkfont.Font(family="Segoe UI", size=self.pt(12))
         self.small = small
         self.bold = bold
 
         # -- top row: presence capsule stretched up to the gear -----------
         top = self.top = tk.Frame(self.root, bg=SURFACE)
-        top.pack(fill="x", padx=10, pady=(9, 2))
+        top.pack(fill="x", padx=self.px(10), pady=(self.px(9), self.px(2)))
         self.gear_font = gear_font
         # Right gap of the gear is 2+10=12px; mirror it on its left.
         # Tiny requested width: fill/expand stretches it to the real room,
         # while the meters below dictate the window's width.
-        self.toggle = tk.Canvas(top, width=60, height=30, bg=SURFACE,
+        self.toggle = tk.Canvas(top, width=self.px(60), height=self.px(30),
+                                bg=SURFACE,
                                 highlightthickness=0, cursor="hand2")
         self.toggle.pack(side="left", fill="x", expand=True)
         self.toggle.bind("<Button-1>", lambda e: self.on_toggle())
@@ -1074,7 +1081,7 @@ class Widget:
 
         # Named: it goes and comes back with the presence row above it.
         self.top_rule = tk.Frame(self.root, height=1, bg=HAIRLINE)
-        self.top_rule.pack(fill="x", padx=10, pady=(7, 0))
+        self.top_rule.pack(fill="x", padx=self.px(10), pady=(self.px(7), 0))
 
         # -- limits: one section per vendor, each folding on its own -------
         # Claude Code and Codex keep separate books, and "Тиждень" means a
@@ -1093,7 +1100,7 @@ class Widget:
         # characters — so the alarm was the part that got cut. Packed only
         # while one is set, above the limits, where nothing else moves.
         self.alarm_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
-                                    fg=SECONDARY, anchor="w", padx=14)
+                                    fg=SECONDARY, anchor="w", padx=self.px(14))
 
         # -- usage meters, grouped by whose limits they are ----------------
         # Fable shares the 5-hour window with everything else and only has a
@@ -1121,7 +1128,7 @@ class Widget:
                       lambda e, s=section: (self.toggle_section(s), "break")[1])
             rule = tk.Frame(meters, height=1, bg=HAIRLINE)
             rule.grid(row=row + 1, column=0, columnspan=3, sticky="ew",
-                      pady=(1, 3))
+                      pady=(1, self.px(3)))
             self.heads[section] = {"head": head, "rule": rule, "row": row}
             if section == "claude":
                 # The Fable fold belongs beside the section it lives in, not
@@ -1134,13 +1141,14 @@ class Widget:
             for key, label, ramp in rows:
                 caption = tk.Label(meters, text=label, font=small, bg=SURFACE,
                                    fg=SECONDARY, anchor="w", width=8)
-                caption.grid(row=row, column=0, sticky="w", pady=2)
-                bar = tk.Canvas(meters, width=170, height=BAR_H, bg=SURFACE,
-                                highlightthickness=0)
-                bar.grid(row=row, column=1, sticky="ew", padx=(2, 8), pady=2)
+                caption.grid(row=row, column=0, sticky="w", pady=self.px(2))
+                bar = tk.Canvas(meters, width=self.px(170), height=self.bar_h,
+                                bg=SURFACE, highlightthickness=0)
+                bar.grid(row=row, column=1, sticky="ew",
+                         padx=(self.px(2), self.px(8)), pady=self.px(2))
                 pct = tk.Label(meters, text="—", font=value, bg=SURFACE,
                                fg=PRIMARY, anchor="e", width=5)
-                pct.grid(row=row, column=2, sticky="e", pady=2)
+                pct.grid(row=row, column=2, sticky="e", pady=self.px(2))
                 self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
                                     "ramp": ramp, "section": section}
                 self.tips[key] = t(NO_DATA_TIP)
@@ -1151,7 +1159,7 @@ class Widget:
         # once the block has been hidden and has to come back — and packed
         # before the first layout, which is already allowed to hide it.
         self.info_rule = tk.Frame(self.root, height=1, bg=HAIRLINE)
-        self.info_rule.pack(fill="x", padx=10)
+        self.info_rule.pack(fill="x", padx=self.px(10))
         self.layout_limits()
 
         self.info_full = ""
@@ -1159,12 +1167,12 @@ class Widget:
         # above it comes and goes with Telegram, and a menu button that
         # travels with it is a menu button you have to look for.
         info_row = tk.Frame(self.root, bg=SURFACE)
-        info_row.pack(fill="x", pady=(4, 6))
+        info_row.pack(fill="x", pady=(self.px(4), self.px(6)))
         self.info_label = tk.Label(info_row, text="", font=small, bg=SURFACE,
-                                   fg=MUTED, anchor="w", padx=14)
+                                   fg=MUTED, anchor="w", padx=self.px(14))
         self.info_label.pack(side="left", fill="x", expand=True)
         self.gear = self.make_gear(info_row, gear_font, small)
-        self.gear.pack(side="right", padx=(6, 12))
+        self.gear.pack(side="right", padx=(self.px(6), self.px(12)))
         self.info_tip = Tooltip(self.info_label, lambda: self.info_full, small)
 
         # -- borderless plumbing: menu everywhere, drag on passive parts --
@@ -1210,6 +1218,9 @@ class Widget:
                     self.apply_click_through),
                    ("radio", t("menu.on"), self.through_var, 1,
                     self.apply_click_through)]
+        scale = [("radio", f"{int(step * 100)}%", self.scale_var, step,
+                  lambda step=step: self.set_scale(step))
+                 for step in (0.7, 0.8, 0.9, 1.0, 1.2)]
         # Everything that only makes sense with a chat on the other end goes
         # when Telegram does — including auto-away, which switches a mode that
         # no longer has anywhere to hand control to. The setup screen stays:
@@ -1224,6 +1235,7 @@ class Widget:
             *chat[1:],
             ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
+            ("sub", t("menu.scale"), scale),
             ("sub", t("menu.clickthrough"), through),
             *presence,
             ("sub", t("menu.language"), langs),
@@ -1273,9 +1285,7 @@ class Widget:
                 os.replace(tmp, CONFIG)
             except (OSError, ValueError):
                 pass
-        subprocess.Popen([sys.executable, os.path.join(ROOT, "widget.pyw")],
-                         cwd=ROOT)
-        self.close()
+        self.restart()
 
     def open_menu(self, event=None):
         if event is not None:
@@ -1366,7 +1376,7 @@ class Widget:
     def build_edge(self):
         """The card's outline. The card shapes itself: `shape_card` punches
         holes in its region, which a ring of its own must not fill in."""
-        self.edge = EdgeRing(self.root, CARD_RADIUS, self.alpha_var.get())
+        self.edge = EdgeRing(self.root, self.radius, self.alpha_var.get())
 
     def place_edge(self):
         if self.edge:
@@ -1387,7 +1397,7 @@ class Widget:
         user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
         hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
         region = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1,
-                                          CARD_RADIUS, CARD_RADIUS)
+                                          self.radius, self.radius)
         if self.punches:
             rect = (ctypes.c_int * 4)()
             user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect))
@@ -1574,8 +1584,10 @@ class Widget:
         if self.telegram:
             if not self.top.winfo_ismapped():
                 below = self.first_below_top()
-                self.top_rule.pack(fill="x", padx=10, pady=(7, 0), before=below)
-                self.top.pack(fill="x", padx=10, pady=(9, 2),
+                self.top_rule.pack(fill="x", padx=self.px(10),
+                                   pady=(self.px(7), 0), before=below)
+                self.top.pack(fill="x", padx=self.px(10),
+                              pady=(self.px(9), self.px(2)),
                               before=self.top_rule)
         else:
             self.top.pack_forget()
@@ -2171,7 +2183,8 @@ class Widget:
         # Nothing installed, nothing to fold: the block goes entirely, rather
         # than leaving headings for vendors that are not here.
         if any(installed.values()):
-            self.meters_frame.pack(fill="x", padx=14, pady=(6, 5),
+            self.meters_frame.pack(fill="x", padx=self.px(14),
+                                   pady=(self.px(6), self.px(5)),
                                    before=self.info_rule)
         else:
             self.meters_frame.pack_forget()
@@ -2337,14 +2350,14 @@ class Widget:
         self.capsule(canvas, 0, width, blend(fill, self.surface, 0.78))
         if percent is not None and percent > 0:
             share = max(0.0, min(100.0, percent)) / 100.0
-            self.capsule(canvas, 0, max(BAR_H, round(width * share)), fill)
+            self.capsule(canvas, 0, max(self.bar_h, round(width * share)), fill)
 
-    @staticmethod
-    def capsule(canvas, x0, x1, color):
-        r = BAR_H / 2
-        canvas.create_oval(x0, 0, x0 + BAR_H, BAR_H, fill=color, outline="")
-        canvas.create_oval(x1 - BAR_H, 0, x1, BAR_H, fill=color, outline="")
-        canvas.create_rectangle(x0 + r, 0, x1 - r, BAR_H, fill=color, outline="")
+    def capsule(self, canvas, x0, x1, color):
+        h = self.bar_h
+        r = h / 2
+        canvas.create_oval(x0, 0, x0 + h, h, fill=color, outline="")
+        canvas.create_oval(x1 - h, 0, x1, h, fill=color, outline="")
+        canvas.create_rectangle(x0 + r, 0, x1 - r, h, fill=color, outline="")
 
     # -- window position --------------------------------------------------
 
@@ -2358,6 +2371,51 @@ class Widget:
                 return json.load(f)
         except (OSError, ValueError):
             return {}
+
+    @staticmethod
+    def saved_scale(saved):
+        """How big the card is drawn, as a factor. Clamped: a card at 20% is
+        unreadable and one at 400% is a wall, and both are one stray keystroke
+        in widget.json away."""
+        try:
+            return min(1.5, max(0.6, float(saved.get("scale", 1.0))))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def px(self, size):
+        """A pixel size at the card's scale. Never below one: a padding that
+        rounds to zero is a layout that collapses."""
+        return max(1, int(round(size * self.scale)))
+
+    def pt(self, size):
+        """A font size at the card's scale. Segoe UI stops being legible below
+        6pt, so that is the floor rather than whatever the maths says."""
+        return max(6, int(round(size * self.scale)))
+
+    @property
+    def bar_h(self):
+        return max(4, self.px(BAR_H))
+
+    @property
+    def radius(self):
+        return self.px(CARD_RADIUS)
+
+    def set_scale(self, value):
+        """Save the new scale and come back at it.
+
+        Tk measures a font when the widget is built, so nothing already on the
+        card would change size — the language switch has the same problem and
+        the same answer: write it down, start again, draw everything once.
+        """
+        self.scale = min(1.5, max(0.6, float(value)))
+        self.save_pos()
+        self.restart()
+
+    def restart(self):
+        """Start a fresh copy of the widget and let this one go."""
+        subprocess.Popen([sys.executable, os.path.join(ROOT, "widget.pyw")],
+                         cwd=ROOT)
+        self.close()
 
     @staticmethod
     def saved_spot(saved):
@@ -2422,6 +2480,7 @@ class Widget:
             with open(POS_FILE, "w", encoding="utf-8") as f:
                 json.dump({"x": self.root.winfo_x(), "y": self.root.winfo_y(),
                            "alpha": self.alpha_var.get(),
+                           "scale": self.scale,
                            "auto_away_seconds": self.auto_var.get(),
                            "fable_shown": self.fable_shown.get(),
                            "claude_shown": self.claude_shown.get(),
