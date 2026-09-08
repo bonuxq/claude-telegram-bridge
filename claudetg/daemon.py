@@ -170,7 +170,23 @@ class Daemon:
 
     @property
     def away(self):
-        return bool(self.state.get("away"))
+        # Away means "answer me in Telegram". With Telegram switched off there
+        # is nobody to answer, so a hook that blocked would wait for a message
+        # that can never arrive: the mode collapses to being at the PC.
+        return bool(self.state.get("away")) and self.telegram_on()
+
+    def telegram_on(self):
+        """Is the Telegram side switched on at all?
+
+        A missing switch means "decide by what is configured". An install that
+        already had a token and a group was working before the switch existed
+        and must not be silenced by an update; a fresh install has neither, so
+        it starts off — which is the default the switch is written to.
+        """
+        section = self.cfg.get("telegram")
+        if isinstance(section, dict) and "enabled" in section:
+            return bool(section["enabled"])
+        return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
 
     # -- topics ---------------------------------------------------------
 
@@ -181,7 +197,8 @@ class Daemon:
         the hooks, the queue. Only the reporting has nowhere to go — and
         attempting it anyway costs a network timeout on every single event.
         """
-        return bool(self.cfg.get("bot_token") and self.cfg.get("chat_id"))
+        return self.telegram_on() and bool(self.cfg.get("bot_token")
+                                           and self.cfg.get("chat_id"))
 
     def per_session_topics(self):
         return bool((self.cfg.get("session_topics") or {}).get("enabled"))
@@ -1591,9 +1608,10 @@ class Daemon:
         # answers HTTP while being deaf to Telegram, which looks healthy and
         # is not.
         while True:
-            if not self.cfg.get("bot_token"):
-                # Fresh install: the daemon is up so the widget can reach it
-                # and hand it a token. Until then there is nothing to poll.
+            if not self.cfg.get("bot_token") or not self.telegram_on():
+                # Fresh install, or the Telegram side switched off: the
+                # daemon stays up so the widget can reach it and hand it a
+                # token, but there is nothing to poll for.
                 time.sleep(2)
                 continue
             try:
@@ -1912,6 +1930,7 @@ class Daemon:
     # -- settings exposed to the widget ----------------------------------
 
     TOGGLES = [
+        "telegram.enabled",
         "live_messages",
         "report_tool_failures",
         "usage_report.enabled",
@@ -1936,6 +1955,8 @@ class Daemon:
     ]
 
     def get_setting(self, path):
+        if path == "telegram.enabled":
+            return self.telegram_on()   # absent means "as configured"
         head, _, tail = path.partition(".")
         if head == "log_when_present":
             return tail in (self.cfg.get(head) or [])
@@ -1994,6 +2015,7 @@ class Daemon:
         widget only has to know whether one is there, not what it is."""
         token = self.cfg.get("bot_token") or ""
         state = {"has_token": bool(token),
+                 "enabled": self.telegram_on(),
                  "token_hint": f"…{token[-4:]}" if len(token) > 4 else "",
                  "chat_id": self.cfg.get("chat_id"),
                  "username": self.state.get("bot_username") or ""}
@@ -2106,6 +2128,7 @@ class Daemon:
         cfg = self.cfg.get("wake_alarm") or {}
         return {"away": self.away, "sessions": sessions,
                 "waiting": waiting, "queued": queued,
+                "telegram": self.telegram_on(),
                 "alarm": {"enabled": bool(cfg.get("enabled")),
                           "minutes": int(cfg.get("minutes") or 15)}}
 

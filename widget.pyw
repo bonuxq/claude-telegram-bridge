@@ -30,7 +30,7 @@ ROOT = (os.path.dirname(os.path.abspath(sys.executable))
         if getattr(sys, "frozen", False)
         else os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from claudetg import i18n, paths, usage  # noqa: E402  (needs ROOT on the path)
+from claudetg import codex, i18n, paths, usage  # noqa: E402  (needs ROOT)
 from claudetg.i18n import t  # noqa: E402
 from claudetg.version import __version__  # noqa: E402
 
@@ -55,6 +55,9 @@ CRITICAL = "#d03b3b"
 ACCENT = "#3987e5"         # meter fill while usage is comfortable
 SEG_COLORS = {"standard": "#86b6ef",   # light blue (sequential ramp, step 250)
               "fable": "#d95926"}      # orange (categorical slot 2, dark step)
+# Whose limits a section holds. Product names, so they are literals here
+# rather than keys — the same way "Fable" always reads "Fable".
+SECTION_NAMES = {"claude": "Claude", "codex": "Codex"}
 # A nearly spent window turns the whole card, not just the meter: the widget
 # is small and usually parked behind something, and a red card still reads.
 # Dim for the 5-hour window, which refills by itself; full red for the weekly
@@ -76,6 +79,7 @@ DEAD = {"dot": CRITICAL, "button": "widget.dead", "label": "widget.dead.hint"}
 BAR_H = 8                  # meter thickness; r = h/2 gives the 4px rounded end
 NO_DATA_TIP = "widget.no_data"
 NO_FABLE_TIP = "widget.no_fable"
+NO_CODEX_TIP = "widget.no_codex"
 ICON_PATH = os.path.join(ROOT, "widget.ico")
 
 
@@ -998,6 +1002,17 @@ class Widget:
         self.hover = False
         self.tips = {}
         self.drag = None
+        # Each vendor's rows are drawn only while that vendor is installed.
+        # Codex keeps its own books, in its own logs; None means it is not on
+        # this machine at all. `rows_drawn` is what the card currently shows,
+        # so a change can be told from a redraw that would change nothing.
+        self.claude = usage.present()
+        self.codex = None
+        # The Telegram side can be switched off entirely, and then the whole
+        # presence half of the card means nothing. Assumed on until the
+        # daemon says otherwise, so a slow first poll does not blink it away.
+        self.telegram = True
+        self.rows_drawn = (self.claude, False)
         self.last_key_ts = 0.0
         self.surface = SURFACE      # the card's current background, alarm aside
 
@@ -1065,9 +1080,17 @@ class Widget:
         tk.Frame(self.root, height=1, bg=HAIRLINE).pack(fill="x", padx=10,
                                                         pady=(7, 0))
 
-        # -- limits header: the Fable row folds away here -----------------
+        # -- limits: one section per vendor, each folding on its own -------
+        # Claude Code and Codex keep separate books, and "Тиждень" means a
+        # different week in each. The heading says whose numbers follow, and
+        # folds that vendor away when clicked; `limits_shown` was the single
+        # fold that used to cover both, so it seeds them on first run.
         self.fable_shown = tk.IntVar(value=int(saved.get("fable_shown", 0)))
-        self.limits_shown = tk.IntVar(value=int(saved.get("limits_shown", 1)))
+        folded = int(saved.get("limits_shown", 1))
+        self.claude_shown = tk.IntVar(value=int(saved.get("claude_shown",
+                                                          folded)))
+        self.codex_shown = tk.IntVar(value=int(saved.get("codex_shown",
+                                                         folded)))
         self.last_usage = None
         # -- alarm, on a line of its own ----------------------------------
         # It used to be the last word of the session list, which is cut at 48
@@ -1076,50 +1099,65 @@ class Widget:
         self.alarm_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
                                     fg=SECONDARY, anchor="w", padx=14)
 
-        limits_bar = tk.Frame(self.root, bg=SURFACE)
-        limits_bar.pack(fill="x", padx=14, pady=(6, 0))
-        self.limits_tab = ShadowText(limits_bar, small)
-        self.limits_tab.pack(side="left")
-        self.limits_tab.bind("<Button-1>",
-                             lambda e: (self.toggle_limits(), "break")[1])
-        self.fable_tab = ShadowText(limits_bar, small)
-        self.fable_tab.pack(side="right")
-        self.fable_tab.bind("<Button-1>",
-                            lambda e: (self.toggle_fable(), "break")[1])
-        self.limits_bar = limits_bar
-
-        # -- usage meters -------------------------------------------------
+        # -- usage meters, grouped by whose limits they are ----------------
         # Fable shares the 5-hour window with everything else and only has a
-        # weekly limit of its own, so it is one extra row rather than a
-        # separate pool: switching views used to hide the numbers that were
-        # still ticking.
+        # weekly limit of its own, so it is one extra row under Claude rather
+        # than a section of its own: switching views used to hide the numbers
+        # that were still ticking.
         meters = tk.Frame(self.root, bg=SURFACE)
-        meters.pack(fill="x", padx=14, pady=(5, 5))
-        meters.columnconfigure(1, weight=1)
         self.meters_frame = meters
         self.meters = {}
+        self.heads = {}
         # Every meter shares the calm blue; only the ramp above it differs.
-        rows = (("five_hour", t("widget.meter.five_hour"), session_color),
-                ("seven_day", t("widget.meter.seven_day"), severity),
-                ("fable", t("widget.meter.fable"), severity))
-        for row, (key, label, ramp) in enumerate(rows):
-            caption = tk.Label(meters, text=label, font=small, bg=SURFACE,
-                               fg=SECONDARY, anchor="w", width=8)
-            caption.grid(row=row, column=0, sticky="w", pady=2)
-            bar = tk.Canvas(meters, width=170, height=BAR_H, bg=SURFACE,
-                            highlightthickness=0)
-            bar.grid(row=row, column=1, sticky="ew", padx=(2, 8), pady=2)
-            pct = tk.Label(meters, text="—", font=value, bg=SURFACE, fg=PRIMARY,
-                           anchor="e", width=5)
-            pct.grid(row=row, column=2, sticky="e", pady=2)
-            self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
-                                "ramp": ramp}
-            self.tips[key] = t(NO_DATA_TIP)
-            Tooltip(bar, lambda k=key: self.tips[k], small)
-            Tooltip(pct, lambda k=key: self.tips[k], small)
+        sections = (
+            ("claude", (("five_hour", t("widget.meter.five_hour"),
+                         session_color),
+                        ("seven_day", t("widget.meter.seven_day"), severity),
+                        ("fable", t("widget.meter.fable"), severity))),
+            ("codex", (("codex", t("widget.meter.seven_day"), severity),)),
+        )
+        meters.columnconfigure(1, weight=1)
+        row = 0
+        for section, rows in sections:
+            head = ShadowText(meters, small)
+            head.grid(row=row, column=0, columnspan=2, sticky="w")
+            head.bind("<Button-1>",
+                      lambda e, s=section: (self.toggle_section(s), "break")[1])
+            rule = tk.Frame(meters, height=1, bg=HAIRLINE)
+            rule.grid(row=row + 1, column=0, columnspan=3, sticky="ew",
+                      pady=(1, 3))
+            self.heads[section] = {"head": head, "rule": rule}
+            if section == "claude":
+                # The Fable fold belongs beside the section it lives in, not
+                # over a heading that says nothing about it.
+                self.fable_tab = ShadowText(meters, small)
+                self.fable_tab.grid(row=row, column=2, sticky="e")
+                self.fable_tab.bind(
+                    "<Button-1>", lambda e: (self.toggle_fable(), "break")[1])
+            row += 2
+            for key, label, ramp in rows:
+                caption = tk.Label(meters, text=label, font=small, bg=SURFACE,
+                                   fg=SECONDARY, anchor="w", width=8)
+                caption.grid(row=row, column=0, sticky="w", pady=2)
+                bar = tk.Canvas(meters, width=170, height=BAR_H, bg=SURFACE,
+                                highlightthickness=0)
+                bar.grid(row=row, column=1, sticky="ew", padx=(2, 8), pady=2)
+                pct = tk.Label(meters, text="—", font=value, bg=SURFACE,
+                               fg=PRIMARY, anchor="e", width=5)
+                pct.grid(row=row, column=2, sticky="e", pady=2)
+                self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
+                                    "ramp": ramp, "section": section}
+                self.tips[key] = t(NO_DATA_TIP)
+                Tooltip(bar, lambda k=key: self.tips[k], small)
+                Tooltip(pct, lambda k=key: self.tips[k], small)
+                row += 1
+        # Named, because it is what the limits block is packed in front of
+        # once the block has been hidden and has to come back — and packed
+        # before the first layout, which is already allowed to hide it.
+        self.info_rule = tk.Frame(self.root, height=1, bg=HAIRLINE)
+        self.info_rule.pack(fill="x", padx=10)
         self.layout_limits()
 
-        tk.Frame(self.root, height=1, bg=HAIRLINE).pack(fill="x", padx=10)
         self.info_full = ""
         self.info_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
                                    fg=MUTED, anchor="w", padx=14)
@@ -1128,7 +1166,7 @@ class Widget:
 
         # -- borderless plumbing: menu everywhere, drag on passive parts --
         self.pop = PopupMenu(self.root, small)
-        for area in (self.root, top, self.info_label, meters, limits_bar,
+        for area in (self.root, top, self.info_label, meters,
                      *[m[part] for m in self.meters.values()
                        for part in ("bar", "pct", "caption")]):
             area.bind("<Button-3>", self.open_menu)
@@ -1170,15 +1208,22 @@ class Widget:
                     self.apply_click_through),
                    ("radio", t("menu.on"), self.through_var, 1,
                     self.apply_click_through)]
+        # Everything that only makes sense with a chat on the other end goes
+        # when Telegram does — including auto-away, which switches a mode that
+        # no longer has anywhere to hand control to. The setup screen stays:
+        # it is where the integration is switched back on.
+        chat = [("cmd", t("menu.projects"), self.open_projects),
+                ("cmd", t("menu.alarm"), self.open_alarm)] if self.telegram else []
+        presence = [("sub", t("menu.autoaway"), auto)] if self.telegram else []
         return [
             ("cmd", t("menu.setup"), self.open_setup),
-            ("cmd", t("menu.projects"), self.open_projects),
+            *chat[:1],
             ("cmd", t("menu.settings"), self.open_settings),
-            ("cmd", t("menu.alarm"), self.open_alarm),
+            *chat[1:],
             ("cmd", t("menu.usage"), self.refresh_usage),
             ("sub", t("menu.alpha"), alpha),
             ("sub", t("menu.clickthrough"), through),
-            ("sub", t("menu.autoaway"), auto),
+            *presence,
             ("sub", t("menu.language"), langs),
             ("sep",),
             ("cmd", t("menu.reset"), self.reset_placement),
@@ -1401,6 +1446,12 @@ class Widget:
     def _poll_worker(self):
         snapshot = self.request("/mode")
         limits = usage.expire_spent_windows(usage.load())
+        # Both are file reads, so they belong on this thread beside the
+        # request; the Codex module only goes to disk when the rollout has
+        # actually grown. Re-checked every poll rather than once at startup:
+        # either can be installed or removed while the widget runs.
+        self.claude = usage.present()
+        self.codex = codex.read()
         self.root.after(0, self.apply, snapshot)
         self.root.after(0, self.apply_usage, limits)
 
@@ -1604,6 +1655,16 @@ class Widget:
                           anchor="w", padx=14, justify="left", wraplength=480)
         status.pack(fill="x", pady=(0, 8))
 
+        # The master switch, above everything it governs: with this off
+        # the bridge sends nothing, listens for nothing, and the card
+        # drops its whole presence half. The token below stays saved.
+        self.check_row(win, t("setup.enabled"),
+                       bool(state.get("enabled", True)),
+                       lambda on: self.push(
+                           "/settings",
+                           {"settings": {"telegram.enabled": on}})
+                       ).pack(fill="x", padx=14, pady=(0, 8))
+
         row = tk.Frame(win, bg=SURFACE)
         row.pack(fill="x", padx=14)
         tk.Label(row, text=t("setup.token.label"), font=self.small, bg=SURFACE,
@@ -1783,6 +1844,7 @@ class Widget:
             self.paint(DEAD, t("widget.dead.info"))
             return
         self.alive = True
+        self.show_presence(bool(snapshot.get("telegram", True)))
         away = bool(snapshot.get("away"))
         if not self.busy:
             self.away_state = away
@@ -1807,6 +1869,25 @@ class Widget:
             line = line[:47].rstrip(" ,·") + "…"
         self.paint(theme, line, "\n".join([names] + info[1:]))
         self.auto_presence(away)
+
+    def show_presence(self, on):
+        """The presence half of the card exists only while Telegram does.
+
+        Away means "answer me in the chat", so with the integration switched
+        off the capsule would offer a mode nobody can act on — and the alarm
+        row would announce a rescue nobody asked for. Both go, and what is
+        left is a limits monitor with a gear on it.
+        """
+        if on == self.telegram:
+            return
+        self.telegram = on
+        if on:
+            self.toggle.pack(side="left", fill="x", expand=True, padx=(0, 12))
+        else:
+            self.toggle.pack_forget()
+            self.toggle_tip.hide()
+        self.root.geometry("")                  # the card lost or gained a row
+        self.root.after(50, self.place_punch)
 
     def paint(self, theme, info, full=None):
         self.theme = theme
@@ -1905,6 +1986,9 @@ class Widget:
                     punch["win"].withdraw()
                     continue
                 source = punch["source"]
+                if not source.winfo_ismapped():
+                    punch["win"].withdraw()     # the capsule is hidden
+                    continue
                 # The control's own screen coordinates. Adding winfo_x() to the
                 # card's origin drops the padding of every frame in between,
                 # which parked the stand-in up and left of the real control.
@@ -1951,10 +2035,16 @@ class Widget:
         self.layout_limits()
         self.save_pos()
 
-    def toggle_limits(self):
-        self.limits_shown.set(0 if self.limits_shown.get() else 1)
+    def toggle_section(self, name):
+        """Fold one vendor's rows away. Each keeps its own preference, so
+        collapsing Claude does not take Codex with it."""
+        var = self.section_var(name)
+        var.set(0 if var.get() else 1)
         self.layout_limits()
         self.save_pos()
+
+    def section_var(self, name):
+        return self.claude_shown if name == "claude" else self.codex_shown
 
     def show_alarm(self, alarm, away):
         """Its own row while an alarm is set, and no row at all when none is.
@@ -1963,7 +2053,9 @@ class Widget:
         is a session you can simply type into — so the row says which of the
         two it is rather than a number that is not counting.
         """
-        wanted = bool(alarm.get("enabled"))
+        # The alarm only ever fires to keep a session reachable from the
+        # chat, so with Telegram off there is nothing to announce.
+        wanted = bool(alarm.get("enabled")) and self.telegram
         shown = bool(self.alarm_label.winfo_ismapped())
         if wanted:
             self.alarm_label.configure(
@@ -1973,39 +2065,69 @@ class Widget:
         if wanted == shown:
             return
         if wanted:
-            self.alarm_label.pack(fill="x", pady=(4, 0), before=self.limits_bar)
+            # Above the limits, or above the rule that ends the card when
+            # there are no limits to be above: packing before a window that
+            # is not itself packed is an error, not a no-op.
+            anchor = (self.meters_frame if self.meters_frame.winfo_ismapped()
+                      else self.info_rule)
+            self.alarm_label.pack(fill="x", pady=(4, 0), before=anchor)
         else:
             self.alarm_label.pack_forget()
         self.root.geometry("")                  # the card grew or shrank
         self.root.after(50, self.place_punch)   # the capsule may have moved
 
     def layout_limits(self):
-        """Fold the meters — and the Fable row inside them — in or out.
+        """Lay out the sections: whose rows are here, and which are folded.
 
-        Collapsing the block takes the Fable tab with it: it switches a row
-        that is no longer on screen, and leaving it behind reads as a live
-        control that does nothing.
+        A section belongs to whoever is installed. Claude Code brings the
+        session and week meters, the Fable row and its fold; Codex brings a
+        week of its own. Both say "Тиждень" and mean different weeks, which
+        is exactly why the headings are there. A machine with only one of the
+        two carries only that one, and with neither the block goes entirely
+        rather than leaving headings for vendors that are not here.
 
-        A nearly spent Fable window overrides both folds without touching the
-        saved preference: hiding the one number that has run out is the one
-        thing the card must not do. Folding it away again works as soon as the
-        window resets.
+        The Fable fold rides in the Claude heading, and goes when that section
+        folds: a control that switches a row nobody can see reads as broken.
+
+        A nearly spent Fable window forces the section open without touching
+        the saved preference — hiding the one number that has run out is the
+        one thing the card must not do. Folding it away again works as soon
+        as the window resets.
         """
-        limits = bool(self.limits_shown.get()) or self.fable_alarm
+        installed = {"claude": self.claude, "codex": self.codex is not None}
+        # A spent Fable window forces Claude's section open, preference or no.
+        open_now = {"claude": (bool(self.claude_shown.get())
+                               or self.fable_alarm),
+                    "codex": bool(self.codex_shown.get())}
         fable = bool(self.fable_shown.get()) or self.fable_alarm
-        row = self.meters["fable"]
-        for part in ("caption", "bar", "pct"):
-            row[part].grid() if (limits and fable) else row[part].grid_remove()
-        if limits:
-            # `after` is required: re-packing appends to the end of the
-            # parent's list, which floated the session line above the meters
-            # instead of leaving it at the bottom of the card.
-            self.meters_frame.pack(fill="x", padx=14, pady=(5, 5),
-                                   after=self.limits_bar)
-            self.fable_tab.pack(side="right")
+        for key, row in self.meters.items():
+            section = row["section"]
+            wanted = (installed[section] and open_now[section]
+                      and (fable or key != "fable"))
+            for part in ("caption", "bar", "pct"):
+                row[part].grid() if wanted else row[part].grid_remove()
+        for name, head in self.heads.items():
+            if installed[name]:
+                head["head"].grid()
+                head["rule"].grid()
+            else:
+                head["head"].grid_remove()
+                head["rule"].grid_remove()
+        # The gap that separates the two sections belongs to the lower one,
+        # and only while there is something above it to be separated from.
+        self.heads["codex"]["head"].grid_configure(
+            pady=(8 if installed["claude"] else 0, 0))
+        if installed["claude"] and open_now["claude"]:
+            self.fable_tab.grid()
+        else:
+            self.fable_tab.grid_remove()
+        # Nothing installed, nothing to fold: the block goes entirely, rather
+        # than leaving headings for vendors that are not here.
+        if any(installed.values()):
+            self.meters_frame.pack(fill="x", padx=14, pady=(6, 5),
+                                   before=self.info_rule)
         else:
             self.meters_frame.pack_forget()
-            self.fable_tab.pack_forget()
         self.paint_tabs()
         self.root.geometry("")      # shrink or grow the card to fit
         self.root.after(50, self.place_punch)   # the capsule may have moved
@@ -2029,9 +2151,10 @@ class Widget:
         else:
             fable_fg = blend(color, self.surface, 0.55)
         self.fable_tab.render("Fable", fable_fg, self.surface)
-        self.limits_tab.render(t("widget.limits"),
-                               SECONDARY if self.limits_shown.get() else MUTED,
-                               self.surface)
+        for name, head in self.heads.items():
+            head["head"].render(SECTION_NAMES[name],
+                                SECONDARY if self.section_var(name).get()
+                                else MUTED, self.surface)
 
     @classmethod
     def walk(cls, widget):
@@ -2076,10 +2199,15 @@ class Widget:
         self.paint_tabs()
         self.place_punch()      # the stand-in wears the same background
 
-    @staticmethod
-    def window_for(limits, key):
+    def window_for(self, limits, key):
         """Fable is scoped to a weekly window only — it draws from the same
-        5-hour pool as everything else, so there is nothing else to unpack."""
+        5-hour pool as everything else, so there is nothing else to unpack.
+
+        Codex is not in this cache at all: another vendor, another log, read
+        on its own schedule, so it arrives already unpacked.
+        """
+        if key == "codex":
+            return self.codex or {}
         if key == "fable":
             section = limits.get("fable")
             return (section or {}).get("seven_day") or {}
@@ -2094,8 +2222,13 @@ class Widget:
             used = window.get("used_percentage")
             if used is None:
                 widgets["pct"].configure(text="—")
-                self.tips[key] = t(NO_FABLE_TIP if key == "fable" and limits
-                                   else NO_DATA_TIP)
+                if key == "codex":
+                    tip = NO_CODEX_TIP      # nothing to do with our cache
+                elif key == "fable" and limits:
+                    tip = NO_FABLE_TIP
+                else:
+                    tip = NO_DATA_TIP
+                self.tips[key] = t(tip)
                 continue
             # The reset time lives in the tooltip: on the card it cost a line
             # per meter and pushed the numbers apart.
@@ -2107,6 +2240,12 @@ class Widget:
         # is wearing, so drawing the bars before it would leave them tinted
         # for the old colour.
         self.set_surface(self.alert_for(shown))
+        # Either vendor appearing or going away changes how many rows there
+        # are — and, when the last one goes, whether the block exists at all.
+        drawn = (self.claude, self.codex is not None)
+        if drawn != self.rows_drawn:
+            self.rows_drawn = drawn
+            self.layout_limits()
         self.follow_fable(shown.get("fable"))
         for key, widgets in self.meters.items():
             self.draw_meter(widgets["bar"], shown.get(key), widgets["ramp"])
@@ -2234,7 +2373,8 @@ class Widget:
                            "alpha": self.alpha_var.get(),
                            "auto_away_seconds": self.auto_var.get(),
                            "fable_shown": self.fable_shown.get(),
-                           "limits_shown": self.limits_shown.get(),
+                           "claude_shown": self.claude_shown.get(),
+                           "codex_shown": self.codex_shown.get(),
                            "click_through": self.through_var.get()}, f)
         except OSError:
             pass

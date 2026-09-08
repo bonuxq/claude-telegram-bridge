@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claudetg import config as cfgmod  # noqa: E402
 from claudetg import daemon as daemon_module  # noqa: E402
 from claudetg.daemon import Daemon  # noqa: E402
-from claudetg import i18n, paths, render, usage  # noqa: E402
+from claudetg import codex, i18n, paths, render, usage  # noqa: E402
 
 # The assertions below are written against the Russian bundle; pin it so the
 # suite does not depend on the OS language of whoever runs it.
@@ -2099,6 +2100,142 @@ def test_the_suite_never_writes_the_real_config():
     after = open(real, encoding="utf-8").read() if os.path.exists(real) else None
     assert before == after, "a test run rewrote the installed config.json"
     print("PASS the suite writes its config and state inside tests/")
+
+
+def test_telegram_switch_silences_the_whole_bridge():
+    d = make_daemon("s.json", away=True)
+    assert d.linked() is True and d.away is True, "a configured bridge must work"
+
+    d.cfg["telegram"] = {"enabled": False}
+    assert d.linked() is False, "the switch must outrank a saved token"
+    # Away means "answer me in the chat". With no chat there is nobody to
+    # answer, so a hook that blocked would wait for a message that can never
+    # arrive: the mode has to collapse to being at the PC.
+    assert d.away is False, "away survived the integration being switched off"
+    assert d.mode_snapshot()["telegram"] is False, "the widget was told nothing"
+
+    d.send(cfgmod.normalize(PROJECT), "TGbotClaude", "must not be sent")
+    assert d.bot.sent == [], d.bot.sent
+    print("PASS the Telegram switch silences sending and away with it")
+
+
+def test_telegram_switch_defaults_to_what_is_configured():
+    d = make_daemon("s.json", away=False)
+    # No key at all: an install that already had a token and a group was
+    # working before the switch existed, and an update must not silence it.
+    assert "telegram" not in d.cfg, "the fixture is supposed to predate the switch"
+    assert d.telegram_on() is True
+    assert d.get_setting("telegram.enabled") is True, "the toggle read as off"
+
+    d.cfg["bot_token"] = ""
+    assert d.telegram_on() is False, "a fresh install has to start off"
+
+    d.cfg["bot_token"] = "x"
+    d.apply_settings({"telegram.enabled": False})
+    assert d.cfg["telegram"]["enabled"] is False, d.cfg.get("telegram")
+    assert d.get_setting("telegram.enabled") is False
+    print("PASS the switch follows the configuration until it is set explicitly")
+
+
+def test_claude_counts_as_present_only_with_its_home():
+    here = os.path.dirname(os.path.abspath(__file__))
+    assert usage.present(home=os.path.join(here, "claude-none")) is False, (
+        "invented a Claude install that is not on the machine")
+    home = os.path.join(here, "claude-home")
+    os.makedirs(home, exist_ok=True)
+    try:
+        # The directory, not a reading: an install that has never written the
+        # cache is still an install, and its rows belong on the card.
+        assert usage.present(home=home) is True
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS Claude counts as present only when its home directory is")
+
+
+def _stamp(epoch):
+    """Codex writes UTC with a Z, which is what its timestamps must look like
+    for the reader to date them correctly."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(epoch))
+
+
+def _token_count(percent, resets_at, when, limit_id="codex"):
+    """One `token_count` event, shaped the way Codex writes it."""
+    window = None if percent is None else {"used_percent": percent,
+                                           "window_minutes": 10080,
+                                           "resets_at": resets_at}
+    return {"timestamp": when, "type": "event_msg",
+            "payload": {"type": "token_count",
+                        "rate_limits": {"limit_id": limit_id, "primary": window,
+                                        "secondary": None, "plan_type": "pro"}}}
+
+
+def _codex_home(name, records):
+    """A throwaway ~/.codex holding one rollout, laid out as Codex lays it."""
+    home = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "codex-" + name)
+    shutil.rmtree(home, ignore_errors=True)
+    folder = os.path.join(home, "sessions", "2026", "09", "08")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "rollout-test.jsonl"), "w",
+              encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    return home
+
+
+def test_codex_limit_is_the_newest_record_that_has_one():
+    now = time.time()
+    resets = now + 5 * 86400
+    home = _codex_home("newest", [
+        _token_count(9.0, resets, _stamp(now - 600)),
+        _token_count(17.0, resets, _stamp(now - 300)),
+        # `premium` reports itself with no window at all; it must not hide the
+        # pool that does have one.
+        _token_count(None, None, _stamp(now - 60), limit_id="premium"),
+    ])
+    try:
+        codex.forget()
+        reading = codex.read(home=home, now=now)
+        assert reading, "a rollout with a limit in it read as nothing"
+        assert reading["used_percentage"] == 17.0, reading
+        assert reading["resets_at"] == resets, reading
+        assert reading["plan_type"] == "pro", reading
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS the Codex limit is the newest record that has one")
+
+
+def test_codex_window_that_has_since_reset_is_unknown():
+    now = time.time()
+    home = _codex_home("reset", [_token_count(100.0, now - 60,
+                                              _stamp(now - 3600))])
+    try:
+        codex.forget()
+        reading = codex.read(home=home, now=now)
+        assert reading is not None, "the row should stay while Codex is here"
+        assert reading["used_percentage"] is None, (
+            "a window that already reset was reported as still full")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS a Codex window that reset reads as unknown, not as full")
+
+
+def test_codex_missing_or_too_old_shows_nothing():
+    now = time.time()
+    codex.forget()
+    absent = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "codex-none")
+    assert codex.read(home=absent, now=now) is None, "invented a limit from nothing"
+
+    home = _codex_home("stale", [_token_count(50.0, now + 86400,
+                                              _stamp(now - 30 * 86400))])
+    try:
+        codex.forget()
+        assert codex.read(home=home, now=now) is None, (
+            "a month-old reading was presented as the current limit")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    print("PASS no Codex, or a reading too old to mean anything, shows nothing")
 
 
 if __name__ == "__main__":

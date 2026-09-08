@@ -31,3 +31,5 @@ dist/
 
 # A test writes this next to itself
 tests/fake_transcript.jsonl
+tests/codex-*/
+tests/claude-*/

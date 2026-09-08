@@ -19,12 +19,31 @@ from .i18n import t
 from .paths import in_app
 
 CACHE = in_app("usage.json")
-CREDENTIALS = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
+# CLAUDE_CONFIG_DIR is Claude Code's own override; without it a machine that
+# moved the directory looks like a machine with no Claude Code on it.
+HOME = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+    os.path.expanduser("~"), ".claude")
+CREDENTIALS = os.path.join(HOME, ".credentials.json")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 WINDOWS = ("five_hour", "seven_day")
 # How long each window covers, for readings that arrive without a reset time.
 LENGTHS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+
+
+def present(home=None):
+    """Is Claude Code on this machine at all?
+
+    The bridge is built around it, but the widget is not only about it any
+    more: it also draws Codex. A machine with only Codex installed should not
+    carry two empty Claude meters and a Fable tab that can never have anything
+    to say, the same way a machine without Codex carries no Codex row.
+
+    The directory, not the cache: an installed Claude Code that has not
+    written a reading yet is still installed, and its rows should say "—"
+    rather than vanish.
+    """
+    return os.path.isdir(home or HOME)
 
 
 def load(path=CACHE, max_age=None):

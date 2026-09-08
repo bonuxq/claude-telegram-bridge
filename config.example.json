@@ -1,6 +1,9 @@
 {
   "_comment": "Copy to config.json and paste the token from @BotFather. chat_id fills itself in once you send /register in the group.",
 
+  "_telegram": "The master switch. Off ships nothing to the chat, listens for nothing, and takes the presence capsule off the widget; absent means \"on if a token and a group are configured\".",
+  "telegram": { "enabled": false },
+
   "bot_token": "PASTE_THE_BOTFATHER_TOKEN_HERE",
   "chat_id": null,
   "language": null,

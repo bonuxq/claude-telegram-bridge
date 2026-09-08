@@ -29,9 +29,11 @@ bridge is Python standard library.
   terminal UI, so the daemon fetches the same numbers itself every 30 seconds
   using the Claude Code token — that is what fills the meters on most setups.
 - **A desktop widget**: borderless always-on-top card with a presence toggle,
-  three usage meters (session, week, Fable), a tray icon showing the session
-  percentage, transparency control, click-through mode and auto-away on
-  keyboard idle. The card turns red on its own when a window is nearly spent.
+  usage meters grouped per vendor (**Claude**: session, week, Fable —
+  **Codex**: week), a tray icon showing the session percentage, transparency
+  control, click-through mode and auto-away on keyboard idle. The card turns
+  red on its own when a window is nearly spent, and Telegram can be switched
+  off entirely to leave a pure limits monitor.
 - **Self-updating**: the installed build fetches new releases from GitHub and
   installs them the first moment no session is running or waiting. It refuses
   any download whose published SHA-256 it cannot confirm.
@@ -114,12 +116,34 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
 
 - **Presence capsule** — the big button; green at the PC, amber away, red
   when the daemon is down (a click brings it up).
-- **Usage meters** — three rows: the shared 5-hour window, the shared weekly
-  one, and Fable's own weekly window. Reset times live in the tooltips.
-  Tap **Limits** or **Fable** to fold either away.
-- **Telegram screen** — the token field, what Telegram makes of it, whether
-  the group is bound and whether the hooks are installed, plus the setup
-  steps. Opens by itself until the bridge is configured.
+- **Usage meters, one section per vendor** — **Claude** holds the shared
+  5-hour window, the shared weekly one and Fable's own weekly window;
+  **Codex** holds its weekly window. Both sections say "Week" and mean
+  different weeks, which is what the headings are for. Reset times live in
+  the tooltips. Click a heading to fold that vendor away; the **Fable** tab
+  in the Claude heading folds just that row.
+- **A section only exists while its vendor does** — no `~/.claude`, no Claude
+  rows and no Fable tab; no Codex, no Codex row; neither, and the whole block
+  goes rather than leaving empty meters behind.
+- **Codex limits** come from the logs Codex already writes
+  (`~/.codex/sessions/**/rollout-*.jsonl`, the `token_count` events): no
+  network, no credentials, and the tail of the file is read only when it has
+  grown. Codex reports a weekly window and nothing else, so that is the one
+  row. A window that reset since the last reading shows "—" rather than a
+  guess at zero.
+- **Telegram screen** — the master switch, the token field, what Telegram
+  makes of it, whether the group is bound and whether the hooks are
+  installed, plus the setup steps. Opens by itself until the bridge is
+  configured.
+- **Telegram can be switched off entirely** — first row of the Telegram
+  screen, and the first toggle in Features (`telegram.enabled`). Off, the
+  bridge sends nothing and listens for nothing, away collapses back to being
+  at the PC (nobody could answer a blocked hook anyway), and the card drops
+  its whole presence half: the capsule, the alarm row, and the menu entries
+  that only mean something with a chat on the other end. What is left is a
+  limits monitor with a gear on it. The token stays saved. A fresh install
+  starts off; an install that already has a token and a group keeps working,
+  because a missing switch means "on if it is configured".
 - **Menu** — Telegram, Projects, Features (every daemon toggle, applied
   instantly), transparency presets, click-through, auto-away, reset the
   widget, hide-to-tray. The gear's tooltip says which version is running.
