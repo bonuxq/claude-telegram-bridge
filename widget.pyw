@@ -1002,6 +1002,10 @@ class Widget:
         self.hover = False
         self.tips = {}
         self.drag = None
+        # The size the card's region was last cut to. Set here rather than
+        # further down: the first layout runs while the card is still being
+        # built, and it already re-cuts it.
+        self._region = (0, 0)
         # Each vendor's rows are drawn only while that vendor is installed.
         # Codex keeps its own books, in its own logs; None means it is not on
         # this machine at all. `rows_drawn` is what the card currently shows,
@@ -1051,24 +1055,15 @@ class Widget:
         self.bold = bold
 
         # -- top row: presence capsule stretched up to the gear -----------
-        top = tk.Frame(self.root, bg=SURFACE)
+        top = self.top = tk.Frame(self.root, bg=SURFACE)
         top.pack(fill="x", padx=10, pady=(9, 2))
         self.gear_font = gear_font
-        self.gear = tk.Label(top, text="⚙", font=gear_font, bg=SURFACE,
-                             fg=MUTED, cursor="hand2")
-        self.gear.pack(side="right", padx=(0, 2))
-        self.gear.bind("<Button-1>", self.open_menu)
-        self.gear.bind("<Enter>", lambda e: self.gear.configure(fg=PRIMARY))
-        self.gear.bind("<Leave>", lambda e: self.gear.configure(fg=MUTED))
-        self.gear_tip = Tooltip(self.gear,
-                                lambda: t("widget.gear", version=__version__),
-                                small)
         # Right gap of the gear is 2+10=12px; mirror it on its left.
         # Tiny requested width: fill/expand stretches it to the real room,
         # while the meters below dictate the window's width.
         self.toggle = tk.Canvas(top, width=60, height=30, bg=SURFACE,
                                 highlightthickness=0, cursor="hand2")
-        self.toggle.pack(side="left", fill="x", expand=True, padx=(0, 12))
+        self.toggle.pack(side="left", fill="x", expand=True)
         self.toggle.bind("<Button-1>", lambda e: self.on_toggle())
         self.toggle.bind("<Enter>", lambda e: self.set_hover(True))
         self.toggle.bind("<Leave>", lambda e: self.set_hover(False))
@@ -1077,8 +1072,9 @@ class Widget:
         self.lang_var = tk.StringVar(value=cfg.get("language") or "auto")
         self.toggle_tip = Tooltip(self.toggle, lambda: t(self.theme["label"]), small)
 
-        tk.Frame(self.root, height=1, bg=HAIRLINE).pack(fill="x", padx=10,
-                                                        pady=(7, 0))
+        # Named: it goes and comes back with the presence row above it.
+        self.top_rule = tk.Frame(self.root, height=1, bg=HAIRLINE)
+        self.top_rule.pack(fill="x", padx=10, pady=(7, 0))
 
         # -- limits: one section per vendor, each folding on its own -------
         # Claude Code and Codex keep separate books, and "Тиждень" means a
@@ -1126,7 +1122,7 @@ class Widget:
             rule = tk.Frame(meters, height=1, bg=HAIRLINE)
             rule.grid(row=row + 1, column=0, columnspan=3, sticky="ew",
                       pady=(1, 3))
-            self.heads[section] = {"head": head, "rule": rule}
+            self.heads[section] = {"head": head, "rule": rule, "row": row}
             if section == "claude":
                 # The Fable fold belongs beside the section it lives in, not
                 # over a heading that says nothing about it.
@@ -1159,9 +1155,16 @@ class Widget:
         self.layout_limits()
 
         self.info_full = ""
-        self.info_label = tk.Label(self.root, text="", font=small, bg=SURFACE,
+        # The gear lives here, at the bottom right, and never moves: the row
+        # above it comes and goes with Telegram, and a menu button that
+        # travels with it is a menu button you have to look for.
+        info_row = tk.Frame(self.root, bg=SURFACE)
+        info_row.pack(fill="x", pady=(4, 6))
+        self.info_label = tk.Label(info_row, text="", font=small, bg=SURFACE,
                                    fg=MUTED, anchor="w", padx=14)
-        self.info_label.pack(fill="x", pady=(4, 6))
+        self.info_label.pack(side="left", fill="x", expand=True)
+        self.gear = self.make_gear(info_row, gear_font, small)
+        self.gear.pack(side="right", padx=(6, 12))
         self.info_tip = Tooltip(self.info_label, lambda: self.info_full, small)
 
         # -- borderless plumbing: menu everywhere, drag on passive parts --
@@ -1174,7 +1177,6 @@ class Widget:
             area.bind("<B1-Motion>", self.on_drag, add="+")
             area.bind("<ButtonRelease-1>", self.end_drag, add="+")
 
-        self._region = (0, 0)
         self.root.bind("<Configure>", self.round_corners)
         self.tray_event = None
         self.tray = Tray(self.on_tray, self.on_key, self.trace)
@@ -1391,6 +1393,8 @@ class Widget:
             user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect))
             for punch in self.punches:
                 source = punch["source"]
+                if not source.winfo_ismapped():
+                    continue    # nothing on screen, nothing to cut away
                 x = source.winfo_rootx() - rect[0]
                 y = source.winfo_rooty() - rect[1]
                 hole = gdi32.CreateRectRgn(x, y, x + source.winfo_width(),
@@ -1547,6 +1551,46 @@ class Widget:
                  add="+")
         win.lift()
         return win
+
+    def make_gear(self, parent, font, small):
+        """The menu button. Built twice: once in the presence row, once in the
+        first section heading — with Telegram off the presence row goes, and a
+        row left over with nothing but a gear in it reads as a mistake. Only
+        one of the two is ever on screen."""
+        gear = tk.Label(parent, text="⚙", font=font, bg=SURFACE, fg=MUTED,
+                        cursor="hand2")
+        gear.bind("<Button-1>", self.open_menu)
+        gear.bind("<Enter>", lambda e: gear.configure(fg=PRIMARY))
+        gear.bind("<Leave>", lambda e: gear.configure(fg=MUTED))
+        Tooltip(gear, lambda: t("widget.gear", version=__version__), small)
+        return gear
+
+    def place_presence_row(self):
+        """The capsule and its rule are there only while Telegram is.
+
+        Nothing else travels with them: the gear sits at the bottom right of
+        the card whatever else is on it.
+        """
+        if self.telegram:
+            if not self.top.winfo_ismapped():
+                below = self.first_below_top()
+                self.top_rule.pack(fill="x", padx=10, pady=(7, 0), before=below)
+                self.top.pack(fill="x", padx=10, pady=(9, 2),
+                              before=self.top_rule)
+        else:
+            self.top.pack_forget()
+            self.top_rule.pack_forget()
+            self.toggle_tip.hide()
+        self.place_edge()
+
+    def first_below_top(self):
+        """Whatever the presence row has to be packed in front of. Packing
+        before a window that is not itself packed is an error, not a no-op,
+        so the alarm row and the meters are only offered while they are up."""
+        for widget in (self.alarm_label, self.meters_frame, self.info_rule):
+            if widget.winfo_ismapped():
+                return widget
+        return self.info_rule
 
     def check_row(self, parent, text, checked, command, dim=False):
         """A themed checkbox row: Windows ignores Tk checkbutton colors."""
@@ -1881,12 +1925,11 @@ class Widget:
         if on == self.telegram:
             return
         self.telegram = on
-        if on:
-            self.toggle.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        else:
-            self.toggle.pack_forget()
-            self.toggle_tip.hide()
+        self.place_presence_row()
         self.root.geometry("")                  # the card lost or gained a row
+        self.root.after(30, self.round_corners)
+        # The card has to be re-cut for the stand-ins too: the hole under a
+        # control that is no longer there stays open otherwise.
         self.root.after(50, self.place_punch)
 
     def paint(self, theme, info, full=None):
@@ -1987,7 +2030,11 @@ class Widget:
                     continue
                 source = punch["source"]
                 if not source.winfo_ismapped():
-                    punch["win"].withdraw()     # the capsule is hidden
+                    punch["win"].withdraw()
+                    if punch["box"] is not None:
+                        # The card is still cut open where this used to be.
+                        punch["box"] = None
+                        moved = True
                     continue
                 # The control's own screen coordinates. Adding winfo_x() to the
                 # card's origin drops the padding of every frame in between,
@@ -2130,6 +2177,10 @@ class Widget:
             self.meters_frame.pack_forget()
         self.paint_tabs()
         self.root.geometry("")      # shrink or grow the card to fit
+        # Folding a section changes the card's size, and the region that
+        # rounds the corners is cut to the old one until it is told —
+        # after the new size has landed, not before it.
+        self.root.after(30, self.round_corners)
         self.root.after(50, self.place_punch)   # the capsule may have moved
 
     def paint_tabs(self):
