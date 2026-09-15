@@ -113,6 +113,11 @@ DEFAULTS = {
     # that nothing is lost by asking less often.
     "usage_poll": {"enabled": True, "interval_seconds": 180,
                    "stale_after_seconds": 45, "timeout_seconds": 10},
+    # The same idea for Codex: its rollouts only record requests made from
+    # this machine, so a week spent from a phone never shows up in them. The
+    # widget asks the usage endpoint Codex's own CLI reads, with the token
+    # the CLI keeps, once a minute. Off, and only the logs are read.
+    "codex_poll": {"enabled": True},
     # Self-update from GitHub Releases. Frozen builds only — from source the
     # update is `git pull`. Installs itself the first moment no session is
     # running, waiting or being spawned.

@@ -1070,6 +1070,8 @@ class Widget:
         # so a change can be told from a redraw that would change nothing.
         self.claude = usage.present()
         self.codex = None
+        self.codex_live = bool((cfg.get("codex_poll") or {}).get("enabled", True))
+        self.cfg_read_at = time.time()
         # The Telegram side can be switched off entirely, and then the whole
         # presence half of the card means nothing. Assumed on until the
         # daemon says otherwise, so a slow first poll does not blink it away.
@@ -1561,7 +1563,14 @@ class Widget:
         # actually grown. Re-checked every poll rather than once at startup:
         # either can be installed or removed while the widget runs.
         self.claude = usage.present()
-        self.codex = codex.read()
+        # The Codex switch lives in config.json, which the daemon owns and
+        # the Features card edits; re-read once a minute so a flip lands
+        # without restarting the widget, and not on every three-second poll.
+        if time.time() - self.cfg_read_at > 60:
+            self.cfg_read_at = time.time()
+            section = load_cfg().get("codex_poll") or {}
+            self.codex_live = bool(section.get("enabled", True))
+        self.codex = codex.read(live=self.codex_live)
         self.root.after(0, self.apply, snapshot)
         self.root.after(0, self.apply_usage, limits)
 
@@ -2404,6 +2413,12 @@ class Widget:
             moment = usage.when(window.get("resets_at"))
             widgets["pct"].configure(text=f"{used:.0f}%")
             self.tips[key] = f"{used:.0f}% · {moment}" if moment else f"{used:.0f}%"
+            # A Codex number that came out of a log rather than off the wire
+            # can be hours old and still be the best there is; say so, so
+            # a stale 90% is not read as a live one.
+            captured = window.get("captured_at") if key == "codex" else None
+            if captured and time.time() - captured > 1800:
+                self.tips[key] += " · " + usage.when_captured(window)
             shown[key] = used
         # Background first: the meter track is mixed into whatever the card
         # is wearing, so drawing the bars before it would leave them tinted

@@ -125,14 +125,18 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
 - **A section only exists while its vendor does** — no `~/.claude`, no Claude
   rows and no Fable tab; no Codex, no Codex row; neither, and the whole block
   goes rather than leaving empty meters behind.
-- **Codex limits** come from the logs Codex already writes
-  (`~/.codex/sessions/**/rollout-*.jsonl`, the `token_count` events): no
-  network, no credentials, and the tail of the file is read only when it has
-  grown. Codex reports one pool per model plus the plan's own; the row is
-  the plan's weekly window, found by its length rather than by which slot it
-  arrived in, because an untouched per-model pool reads zero and is written
-  just as often. A window that reset since the last reading shows "—" rather
-  than a guess at zero.
+- **Codex limits** are asked of the usage endpoint Codex's own CLI reads
+  for `/status` (`chatgpt.com/backend-api/wham/usage`), once a minute, with
+  the token the CLI keeps in `~/.codex/auth.json` — the same way `usage_poll`
+  works for Claude, and off with `codex_poll.enabled` in Features. This is
+  the only source that knows about a week spent from a phone or another
+  machine. The logs Codex writes anyway (`~/.codex/sessions/**/rollout-*.jsonl`
+  and `archived_sessions/`, the `token_count` events) are the fallback, and
+  whichever reading is fresher wins. Codex reports one pool per model plus
+  the plan's own; the row is the plan's weekly window, found by its length
+  rather than by which slot it arrived in. A window that reset since the
+  last reading shows 0%: the week it described has ended and nothing has
+  been spent in the new one, or there would be a newer reading.
 - **Telegram screen** — the master switch, the token field, what Telegram
   makes of it, whether the group is bound and whether the hooks are
   installed, plus the setup steps. Opens by itself until the bridge is

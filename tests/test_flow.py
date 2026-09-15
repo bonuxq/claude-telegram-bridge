@@ -2183,6 +2183,40 @@ def _codex_home(name, records):
     return home
 
 
+def test_codex_live_answer_is_read_like_a_rollout():
+    now = time.time()
+    payload = {"plan_type": "pro",
+               "rate_limit": {"allowed": False, "limit_reached": True,
+                              "primary_window": {"used_percent": 100,
+                                                 "limit_window_seconds": 604800,
+                                                 "reset_at": now + 359743},
+                              "secondary_window": {}}}
+    reading = codex.parse_live(payload, now=now)
+    assert reading["used_percentage"] == 100.0, reading
+    assert reading["window_minutes"] == 10080, reading
+    assert reading["resets_at"] == now + 359743, reading
+    assert reading["source"] == "live" and reading["pool"] == "codex", reading
+    assert codex.parse_live({"rate_limit": {}}, now=now) is None, "no windows, no reading"
+    print("PASS the live Codex answer is read like a rollout record")
+
+
+def test_codex_fresher_reading_wins():
+    now = time.time()
+    week = now + 4 * 86400
+    logged = {"used_percentage": 90.0, "resets_at": week, "captured_at": now - 86400}
+    live = {"used_percentage": 100.0, "resets_at": week, "captured_at": now - 30,
+            "source": "live"}
+    # The wire knows about the phone; the rollout does not.
+    assert codex._fresher(live, logged, now)["used_percentage"] == 100.0
+    # No network for a day, and a rollout written since: the rollout is newer.
+    stale_live = dict(live, captured_at=now - 2 * 86400)
+    assert codex._fresher(stale_live, logged, now)["used_percentage"] == 90.0
+    # Only one of the two is ever fine.
+    assert codex._fresher(None, logged, now)["used_percentage"] == 90.0
+    assert codex._fresher(None, None, now) is None
+    print("PASS the fresher of the live and logged Codex readings wins")
+
+
 def test_codex_prefers_the_plans_own_pool():
     now = time.time()
     week = now + 5 * 86400

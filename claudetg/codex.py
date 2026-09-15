@@ -1,24 +1,34 @@
-"""Codex's weekly limit, read from the log Codex already writes.
+"""Codex's weekly limit: asked of the usage endpoint its own CLI uses, and
+read from the logs it already writes when that is not possible.
 
-Claude Code lends the bridge a status line; Codex has nothing of the sort — no
-hook to install, no cache to share, no supported command to ask. What it does
-have is a rollout per session under `~/.codex/sessions/YYYY/MM/DD/`, where
-every answer appends a `token_count` event carrying the same `rate_limits` its
-own UI reads. The number is already on disk, so this finds the newest line
-that has one.
+The endpoint is the truth. A rollout only records the limit as it stood after
+a request *from this machine*, so a week spent from a phone, a browser or a
+second computer never shows up in one — the card sat on 90% while the plan
+was at 100%. `GET chatgpt.com/backend-api/wham/usage`, with the token the CLI
+keeps in `~/.codex/auth.json`, answers for the account rather than the
+machine; it is what `codex` itself reads for `/status`.
+
+The logs are the fallback: a rollout per session under
+`~/.codex/sessions/YYYY/MM/DD/` (moved to `archived_sessions/` once closed),
+where every answer appends a `token_count` event carrying the same
+`rate_limits` the UI shows. No network, no token — and no news from anywhere
+else.
 
 The row is the plan's weekly window. Codex reports one pool per model on top
 of the plan's own, and a per-model pool carries a 5-hour window too, but the
 plan pool is the number its UI shows and the week is the limit that bites.
 
-Nothing here reaches the network or opens Codex's credentials: it reads the
-tail of a file Codex wrote anyway, and stays quiet when there is none.
+The token is read from disk and sent to exactly one host, the one Codex sends
+it to itself. `codex_poll.enabled` in config.json turns the endpoint off,
+leaving only the logs.
 """
 
 import datetime
 import json
 import os
 import time
+import urllib.error
+import urllib.request
 
 # CODEX_HOME is Codex's own override; honouring it costs one lookup and is the
 # difference between working and silently reading nothing on a machine that
@@ -53,12 +63,79 @@ MAX_AGE = 14 * 86400
 MAIN_POOL = "codex"
 WEEK_MINUTES = 10080
 
+AUTH = os.path.join(HOME, "auth.json")
+USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+# The endpoint is cheap and the number is slow: once a minute is plenty. A
+# failure — no network, a token the CLI has not refreshed yet — backs off
+# rather than asking a dead line every minute.
+LIVE_INTERVAL = 60
+LIVE_BACKOFF = 300
+LIVE_TIMEOUT = 8
+
 _cache = {"at": 0.0, "key": None, "reading": None}
+_live = {"next": 0.0, "reading": None}
 
 
 def forget():
-    """Drop the cache, so the next read actually touches the disk."""
+    """Drop the caches, so the next read actually touches disk and network."""
     _cache.update({"at": 0.0, "key": None, "reading": None})
+    _live.update({"next": 0.0, "reading": None})
+
+
+def access_token(path=None):
+    """The CLI's own token, or None. The CLI rewrites the file when it
+    refreshes, so a later read recovers from an expired one."""
+    try:
+        with open(path or AUTH, encoding="utf-8") as f:
+            tokens = (json.load(f) or {}).get("tokens") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    return tokens.get("access_token") or None
+
+
+def parse_live(payload, now=None):
+    """The endpoint's answer in the shape the log reader produces.
+
+    The windows arrive as `primary_window` / `secondary_window` with the
+    length in seconds; the weekly one is picked by that length, the same way
+    as in a rollout, since which slot holds the week is not promised.
+    """
+    limits = (payload or {}).get("rate_limit") or {}
+    windows = [w for w in (limits.get("primary_window"),
+                           limits.get("secondary_window"))
+               if isinstance(w, dict) and w.get("used_percent") is not None]
+    if not windows:
+        return None
+    weekly = [w for w in windows
+              if w.get("limit_window_seconds") == WEEK_MINUTES * 60]
+    window = weekly[0] if weekly else max(
+        windows, key=lambda w: w.get("limit_window_seconds") or 0)
+    return {"used_percentage": float(window["used_percent"]),
+            "resets_at": window.get("reset_at"),
+            "window_minutes": (window.get("limit_window_seconds") or 0) // 60,
+            "pool": MAIN_POOL,
+            "plan_type": (payload or {}).get("plan_type"),
+            "captured_at": now or time.time(),
+            "source": "live"}
+
+
+def fetch_live(token=None, timeout=LIVE_TIMEOUT, url=USAGE_URL, now=None):
+    """Ask the endpoint the CLI uses. None on any failure: the logs are
+    still there, and a widget is not the place to report a dead network."""
+    token = token or access_token()
+    if not token:
+        return None
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "claudetg-bridge (stdlib urllib)",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    return parse_live(payload, now)
 
 
 def sessions_dir(home=None):
@@ -225,17 +302,53 @@ def from_file(path):
     return reading
 
 
-def read(home=None, now=None):
+def read(home=None, now=None, live=None):
     """The current Codex weekly limit, or None when there is nothing to show.
 
     Shaped like the windows in `usage`: `used_percentage` and `resets_at`, so
-    the widget draws it with the same code as every other meter. A window that
-    turned over since it was written reads as zero with no reset time: the
-    week it described has ended, nothing has been spent in the new one or
-    there would be a newer record, and a dash where a number belongs reads as
-    "broken", not as "fresh".
+    the widget draws it with the same code as every other meter.
+
+    The endpoint and the logs are both consulted, and the fresher reading
+    wins: normally the endpoint, since a rollout only knows about requests
+    made from this machine. With no network the last live answer keeps
+    winning until a rollout has something newer to say, and with no token
+    the logs are all there is. `live` defaults to on for the real home and
+    off for any other — a test with a fixture directory must not reach
+    for the real token.
+
+    A window that turned over since it was written reads as zero with no
+    reset time: the week it described has ended, nothing has been spent in
+    the new one or there would be a newer record, and a dash where a number
+    belongs reads as "broken", not as "fresh".
     """
     now = now or time.time()
+    if live is None:
+        live = home is None
+    if live and now >= _live["next"]:
+        found = fetch_live(now=now)
+        if found:
+            _live["reading"] = found
+        _live["next"] = now + (LIVE_INTERVAL if found else LIVE_BACKOFF)
+    return _fresher(_live["reading"] if live else None,
+                    _from_logs(home, now), now)
+
+
+def _fresher(live, logged, now):
+    """Whichever reading was taken later, with the window-reset rule applied
+    to it: the fresher of two readings is still the one to trust, even when
+    it comes from a log rather than the wire."""
+    picks = [r for r in (live, logged) if r]
+    if not picks:
+        return None
+    reading = max(picks, key=lambda r: r.get("captured_at") or 0)
+    resets = reading.get("resets_at") or 0
+    if resets and resets <= now:
+        return dict(reading, used_percentage=0.0, resets_at=None, reset=True)
+    return reading
+
+
+def _from_logs(home, now):
+    """The newest reading in the rollouts, cached by what is on disk."""
     if now - _cache["at"] < MIN_INTERVAL:
         return _cache["reading"]
     _cache["at"] = now
@@ -255,11 +368,7 @@ def read(home=None, now=None):
         reading = reading or found
     if reading:
         captured = reading.get("captured_at") or 0
-        resets = reading.get("resets_at") or 0
         if captured and now - captured > MAX_AGE:
             reading = None                      # Codex has not run in weeks
-        elif resets and resets <= now:
-            reading = dict(reading, used_percentage=0.0, resets_at=None,
-                           reset=True)
     _cache["reading"] = reading
     return reading

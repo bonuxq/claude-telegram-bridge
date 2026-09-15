@@ -1935,6 +1935,7 @@ class Daemon:
         "report_tool_failures",
         "usage_report.enabled",
         "usage_poll.enabled",
+        "codex_poll.enabled",
         "status_monitor.enabled",
         "watchdog.enabled",
         "stop_grace.enabled",
