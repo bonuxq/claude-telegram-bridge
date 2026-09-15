@@ -7,10 +7,9 @@ every answer appends a `token_count` event carrying the same `rate_limits` its
 own UI reads. The number is already on disk, so this finds the newest line
 that has one.
 
-Only the weekly window exists. Across every rollout on the machine this was
-written against, `secondary` was always null and `window_minutes` always
-10080, so there is no session window to show and no reason to invent a row
-for one.
+The row is the plan's weekly window. Codex reports one pool per model on top
+of the plan's own, and a per-model pool carries a 5-hour window too, but the
+plan pool is the number its UI shows and the week is the limit that bites.
 
 Nothing here reaches the network or opens Codex's credentials: it reads the
 tail of a file Codex wrote anyway, and stays quiet when there is none.
@@ -36,7 +35,11 @@ TAIL = 256 * 1024
 DEEP_TAIL = 8 * 1024 * 1024
 # Rollouts to look through, newest first: the newest file can belong to a pool
 # that reports no window of its own, and the answer is then one file back.
-CANDIDATES = 4
+CANDIDATES = 6
+# How far back the day directories are walked for those. Codex creates a
+# rollout the moment a window opens, so a quiet week leaves a few empty files
+# in the newest days with the last real reading days behind them.
+DAYS = 30
 # The widget polls every three seconds. A weekly window does not move at that
 # speed, and re-reading a quarter of a megabyte twenty times a minute is a tax
 # on the disk for a number that cannot have changed meaningfully.
@@ -71,7 +74,7 @@ def _entries(path):
         return []
 
 
-def day_dirs(root, want=3):
+def day_dirs(root, want=DAYS):
     """The most recent day directories, newest first.
 
     Walked year -> month -> day rather than globbed: the archive only ever
@@ -107,7 +110,13 @@ def newest_rollouts(home=None, want=CANDIDATES):
                 info = os.stat(path)
             except OSError:
                 continue
-            found.append((info.st_mtime, info.st_size, path))
+            # A rollout is created when a window opens and stays empty until
+            # something is said in it. Those hold nothing to read, and every
+            # one of them would otherwise use up a candidate slot.
+            if info.st_size > 0:
+                found.append((info.st_mtime, info.st_size, path))
+        if len(found) >= want:
+            break               # the days are newest first: enough already
     found.sort(reverse=True)
     return [(path, mtime, size) for mtime, size, path in found[:want]]
 
@@ -220,9 +229,11 @@ def read(home=None, now=None):
     """The current Codex weekly limit, or None when there is nothing to show.
 
     Shaped like the windows in `usage`: `used_percentage` and `resets_at`, so
-    the widget draws it with the same code as every other meter. A percentage
-    of None means the window turned over since it was written — unknown rather
-    than zero, because a new week starting is not a reading.
+    the widget draws it with the same code as every other meter. A window that
+    turned over since it was written reads as zero with no reset time: the
+    week it described has ended, nothing has been spent in the new one or
+    there would be a newer record, and a dash where a number belongs reads as
+    "broken", not as "fresh".
     """
     now = now or time.time()
     if now - _cache["at"] < MIN_INTERVAL:
@@ -248,6 +259,7 @@ def read(home=None, now=None):
         if captured and now - captured > MAX_AGE:
             reading = None                      # Codex has not run in weeks
         elif resets and resets <= now:
-            reading = dict(reading, used_percentage=None, resets_at=None)
+            reading = dict(reading, used_percentage=0.0, resets_at=None,
+                           reset=True)
     _cache["reading"] = reading
     return reading

@@ -77,6 +77,7 @@ AWAY = {"dot": WARNING, "button": "widget.away", "label": "widget.away.hint"}
 DEAD = {"dot": CRITICAL, "button": "widget.dead", "label": "widget.dead.hint"}
 
 BAR_H = 8                  # meter thickness; r = h/2 gives the 4px rounded end
+HOLE_INSET = 2             # how far inside its stand-in a hole is cut
 NO_DATA_TIP = "widget.no_data"
 NO_FABLE_TIP = "widget.no_fable"
 NO_CODEX_TIP = "widget.no_codex"
@@ -477,10 +478,11 @@ class Tray(threading.Thread):
 
     WM_TRAY = 0x8001          # WM_APP + 1
 
-    def __init__(self, on_event, on_key, on_error=None):
+    def __init__(self, on_event, on_key, on_error=None, on_click=None):
         super().__init__(daemon=True)
         self.on_event = on_event
         self.on_key = on_key
+        self.on_click = on_click
         self.on_error = on_error
         self.hwnd = None
         self.hicon = None
@@ -534,6 +536,8 @@ class Tray(threading.Thread):
         def mouse_proc(code, wparam, lparam):
             if code >= 0 and wparam in BUTTONS:
                 self.on_key()
+                if self.on_click:
+                    self.on_click()
             return user32.CallNextHookEx(None, code,
                                          ctypes.c_size_t(wparam or 0),
                                          ctypes.c_ssize_t(lparam or 0)) or 0
@@ -757,11 +761,19 @@ class PopupMenu:
            ("radio", label, tk_variable, value, callback)
     """
 
+    # After opening, how long the pointer may take to reach the menu; and
+    # once it has been away, how long before the menu gives up on it.
+    OPEN_GRACE = 2.0
+    AWAY_LIMIT = 0.8
+
     def __init__(self, root, font):
         self.root = root
         self.font = font
         self.wins = []
         self.hide_job = None
+        self.watch_job = None
+        self.opened_at = 0.0
+        self.away_since = None
         self.sub_job = None        # pending "the pointer left the submenu"
         self.sub_owner = None      # the row whose submenu is currently open
 
@@ -774,6 +786,49 @@ class PopupMenu:
         # <Button> is not bound app-wide anywhere else, so unbind_all on close
         # takes back exactly this one.
         self.wins[0].bind_all("<Button>", self._maybe_dismiss, add="+")
+        self.opened_at = time.time()
+        self.away_since = None
+        self._watch()
+
+    def _watch(self):
+        """Close the menu once the pointer has been away from it for a while,
+        whether or not it was ever over it.
+
+        <Leave> only fires for a pointer that was inside first. A menu opened
+        from the tray or the gear appears beside the pointer, not under it,
+        and one the pointer never reaches never gets a <Leave> — it stayed up
+        until something in the widget was clicked, which with click-through
+        on is nothing at all. Asking where the pointer is cannot be fooled.
+        """
+        self.watch_job = None
+        if not self.wins:
+            return
+        now = time.time()
+        x, y = self.root.winfo_pointerxy()
+        if any(self._inside(win, x, y) for win in self.wins):
+            self.away_since = None
+        else:
+            self.away_since = self.away_since or now
+            if (now - self.opened_at > self.OPEN_GRACE
+                    and now - self.away_since > self.AWAY_LIMIT):
+                self.close()
+                return
+        self.watch_job = self.root.after(200, self._watch)
+
+    def outside_click(self, at):
+        """A mouse button went down somewhere on the machine at `at`. If that
+        was not on the menu, the menu is done — this is the only way a click
+        on another window, or on a click-through card, ever reaches it.
+
+        Except the click that opened it: the hook sees that one before the
+        menu exists, and the pump would report it a moment later as a click
+        beside a menu that is now open — and close it on arrival.
+        """
+        if not self.wins or at <= self.opened_at:
+            return
+        x, y = self.root.winfo_pointerxy()
+        if not any(self._inside(win, x, y) for win in self.wins):
+            self.close()
 
     def _maybe_dismiss(self, event):
         if any(self._inside(win, event.x_root, event.y_root)
@@ -970,6 +1025,9 @@ class PopupMenu:
     def close(self):
         self._cancel_hide()
         self._cancel_sub_close()
+        if self.watch_job:
+            self.root.after_cancel(self.watch_job)
+            self.watch_job = None
         if self.wins:
             try:
                 self.wins[0].unbind_all("<Button>")
@@ -1199,7 +1257,8 @@ class Widget:
 
         self.root.bind("<Configure>", self.round_corners)
         self.tray_event = None
-        self.tray = Tray(self.on_tray, self.on_key, self.trace)
+        self.click_ts = self.click_seen = 0.0     # mouse hook -> pump
+        self.tray = Tray(self.on_tray, self.on_key, self.trace, self.on_click)
         self.tray.start()
         self.root.after(150, self.tray_pump)
         # After the window really exists, or there is no hwnd to restyle.
@@ -1321,7 +1380,15 @@ class Widget:
         # Called from the keyboard hook (tray thread): a timestamp is enough.
         self.last_key_ts = time.time()
 
+    def on_click(self):
+        # Called from the mouse hook (tray thread): only note when, Tk is
+        # not thread-safe. The pump looks at where the pointer is.
+        self.click_ts = time.time()
+
     def tray_pump(self):
+        if self.click_ts > self.click_seen:
+            self.click_seen = self.click_ts
+            self.pop.outside_click(self.click_ts)
         event, self.tray_event = self.tray_event, None
         if event == "toggle":
             self.toggle_visible()
@@ -1425,8 +1492,18 @@ class Widget:
                     continue    # nothing on screen, nothing to cut away
                 x = source.winfo_rootx() - rect[0]
                 y = source.winfo_rooty() - rect[1]
-                hole = gdi32.CreateRectRgn(x, y, x + source.winfo_width(),
-                                           y + source.winfo_height())
+                # Cut the hole a pixel inside the stand-in on every side.
+                # The two are placed from the same numbers, but a build
+                # that Windows scales for DPI rounds a window and a
+                # region differently, and a hole one pixel wider than
+                # what covers it is a bright hairline of desktop all the
+                # way round the gear. A pixel of double composite along
+                # the edge is invisible; a pixel of daylight is not.
+                inset = HOLE_INSET
+                hole = gdi32.CreateRectRgn(
+                    x + inset, y + inset,
+                    x + source.winfo_width() - inset,
+                    y + source.winfo_height() - inset)
                 gdi32.CombineRgn(region, region, hole, 4)   # RGN_DIFF
                 gdi32.DeleteObject(hole)
         # The system takes ownership of `region`; it must not be deleted here.

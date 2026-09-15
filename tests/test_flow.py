@@ -2268,7 +2268,7 @@ def test_codex_limit_is_the_newest_record_that_has_one():
     print("PASS the Codex limit is the newest record that has one")
 
 
-def test_codex_window_that_has_since_reset_is_unknown():
+def test_codex_window_that_has_since_reset_is_empty():
     now = time.time()
     home = _codex_home("reset", [_token_count(100.0, now - 60,
                                               _stamp(now - 3600))])
@@ -2276,11 +2276,16 @@ def test_codex_window_that_has_since_reset_is_unknown():
         codex.forget()
         reading = codex.read(home=home, now=now)
         assert reading is not None, "the row should stay while Codex is here"
-        assert reading["used_percentage"] is None, (
+        # The week it described has ended and nothing has been spent in
+        # the new one, or there would be a newer record: that is zero, and
+        # a dash where a number belongs reads as broken.
+        assert reading["used_percentage"] == 0.0, (
             "a window that already reset was reported as still full")
+        assert reading["resets_at"] is None, "a reset time in the past was kept"
+        assert reading.get("reset") is True
     finally:
         shutil.rmtree(home, ignore_errors=True)
-    print("PASS a Codex window that reset reads as unknown, not as full")
+    print("PASS a Codex window that reset reads as empty, not as full")
 
 
 def test_codex_missing_or_too_old_shows_nothing():
