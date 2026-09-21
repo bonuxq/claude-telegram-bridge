@@ -110,6 +110,15 @@ def access_token(path=None):
     return oauth.get("accessToken") or None
 
 
+def credentials_stamp(path=None):
+    """When the CLI last rewrote its credentials — which is when a token
+    that had expired stops being expired. Zero when there is no file."""
+    try:
+        return os.path.getmtime(path or CREDENTIALS)
+    except OSError:
+        return 0.0
+
+
 def epoch_of(stamp):
     """ISO-8601 with an offset -> unix seconds, the shape statusline.py caches."""
     if not stamp:

@@ -2137,6 +2137,37 @@ def test_telegram_switch_defaults_to_what_is_configured():
     print("PASS the switch follows the configuration until it is set explicitly")
 
 
+def test_usage_poll_wakes_when_the_cli_writes_a_new_token():
+    here = os.path.dirname(os.path.abspath(__file__))
+    creds = os.path.join(here, "fake-credentials.json")
+    # No file: a zero stamp, not an exception, and a stamp that changes the
+    # moment the CLI writes one — that is the whole signal the poll waits on.
+    assert usage.credentials_stamp(creds) == 0.0
+    try:
+        with open(creds, "w", encoding="utf-8") as f:
+            f.write("{}")
+        assert usage.credentials_stamp(creds) > 0.0
+        real = usage.CREDENTIALS
+        usage.CREDENTIALS = creds
+        started = time.time()
+        # Rewrite the file from another thread half a second in: the sleep is
+        # asked for a minute and must come back early rather than sit it out.
+        def rewrite():
+            time.sleep(0.5)
+            os.utime(creds, (time.time() + 5, time.time() + 5))
+        threading.Thread(target=rewrite, daemon=True).start()
+        Daemon.sleep_unless_new_token(60)
+        waited = time.time() - started
+        usage.CREDENTIALS = real
+        assert waited < 20, f"slept {waited:.1f}s through a fresh token"
+    finally:
+        try:
+            os.remove(creds)
+        except OSError:
+            pass
+    print("PASS the usage poll wakes as soon as the CLI writes a new token")
+
+
 def test_claude_counts_as_present_only_with_its_home():
     here = os.path.dirname(os.path.abspath(__file__))
     assert usage.present(home=os.path.join(here, "claude-none")) is False, (

@@ -650,7 +650,27 @@ class Daemon:
                 delay = max(floor, min(interval * (2 ** min(failures, 5)), 900))
             else:
                 failures = 0
-            time.sleep(delay)
+            self.sleep_unless_new_token(delay)
+
+    @staticmethod
+    def sleep_unless_new_token(seconds):
+        """Sleep, but wake the moment the CLI writes fresh credentials.
+
+        An expired token is only ever refreshed by Claude Code itself, when
+        it starts. The poll that was backing off from a 401 would then sit
+        out the rest of a fifteen-minute wait with a working token on disk,
+        and the card showed yesterday's number for as long. Seen live: a
+        week at 59% on the card while the account was at 84%.
+        """
+        stamp = usage.credentials_stamp()
+        deadline = time.time() + seconds
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return
+            time.sleep(min(15, left))
+            if usage.credentials_stamp() != stamp:
+                return
 
     def hold_usage(self, seconds, floor=None):
         """Remember how long the server asked to be left alone, and at what

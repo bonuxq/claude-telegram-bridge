@@ -78,6 +78,7 @@ DEAD = {"dot": CRITICAL, "button": "widget.dead", "label": "widget.dead.hint"}
 
 BAR_H = 8                  # meter thickness; r = h/2 gives the 4px rounded end
 HOLE_INSET = 2             # how far inside its stand-in a hole is cut
+STALE_AFTER = 1800         # a reading older than this is drawn dimmed
 NO_DATA_TIP = "widget.no_data"
 NO_FABLE_TIP = "widget.no_fable"
 NO_CODEX_TIP = "widget.no_codex"
@@ -2394,6 +2395,10 @@ class Widget:
     def apply_usage(self, data):
         self.last_usage = data
         limits = (data or {}).get("rate_limits") or {}
+        # When the Claude cache was written. A poll that cannot refresh —
+        # an expired token, no network — leaves the last reading in place,
+        # and a reading from last night must not look like one from now.
+        taken = (data or {}).get("captured_at") or 0
         shown = {}
         for key, widgets in self.meters.items():
             window = self.window_for(limits, key)
@@ -2411,14 +2416,17 @@ class Widget:
             # The reset time lives in the tooltip: on the card it cost a line
             # per meter and pushed the numbers apart.
             moment = usage.when(window.get("resets_at"))
-            widgets["pct"].configure(text=f"{used:.0f}%")
             self.tips[key] = f"{used:.0f}% · {moment}" if moment else f"{used:.0f}%"
-            # A Codex number that came out of a log rather than off the wire
-            # can be hours old and still be the best there is; say so, so
-            # a stale 90% is not read as a live one.
-            captured = window.get("captured_at") if key == "codex" else None
-            if captured and time.time() - captured > 1800:
-                self.tips[key] += " · " + usage.when_captured(window)
+            # Codex carries its own stamp; the Claude rows share the cache's.
+            # Past half an hour the number is dimmed and the tip says when it
+            # was taken: the best there is, but not the present.
+            source = window if key == "codex" else {"captured_at": taken}
+            captured = source.get("captured_at") or 0
+            old = bool(captured) and time.time() - captured > STALE_AFTER
+            widgets["pct"].configure(text=f"{used:.0f}%",
+                                     fg=MUTED if old else PRIMARY)
+            if old:
+                self.tips[key] += " · " + usage.when_captured(source)
             shown[key] = used
         # Background first: the meter track is mixed into whatever the card
         # is wearing, so drawing the bars before it would leave them tinted
