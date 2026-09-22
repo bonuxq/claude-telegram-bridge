@@ -1072,6 +1072,10 @@ class Widget:
         self.claude = usage.present()
         self.codex = None
         self.codex_live = bool((cfg.get("codex_poll") or {}).get("enabled", True))
+        # "ok" / "expired" / "missing" per vendor: a card that shows nothing
+        # but a dash looks broken, when the real answer is "nobody is logged
+        # in". Filled by the poll, beside the readings themselves.
+        self.auth = {"claude": "ok", "codex": "ok"}
         self.cfg_read_at = time.time()
         # The Telegram side can be switched off entirely, and then the whole
         # presence half of the card means nothing. Assumed on until the
@@ -1198,6 +1202,7 @@ class Widget:
             head.grid(row=row, column=0, columnspan=2, sticky="w")
             head.bind("<Button-1>",
                       lambda e, s=section: (self.toggle_section(s), "break")[1])
+            Tooltip(head, lambda s=section: self.section_tip(s), self.small)
             rule = tk.Frame(meters, height=1, bg=HAIRLINE)
             rule.grid(row=row + 1, column=0, columnspan=3, sticky="ew",
                       pady=(1, self.px(3)))
@@ -1564,6 +1569,7 @@ class Widget:
         # actually grown. Re-checked every poll rather than once at startup:
         # either can be installed or removed while the widget runs.
         self.claude = usage.present()
+        self.auth["claude"] = usage.auth_state()
         # The Codex switch lives in config.json, which the daemon owns and
         # the Features card edits; re-read once a minute so a flip lands
         # without restarting the widget, and not on every three-second poll.
@@ -1572,6 +1578,7 @@ class Widget:
             section = load_cfg().get("codex_poll") or {}
             self.codex_live = bool(section.get("enabled", True))
         self.codex = codex.read(live=self.codex_live)
+        self.auth["codex"] = codex.auth_state() if self.codex_live else "ok"
         self.root.after(0, self.apply, snapshot)
         self.root.after(0, self.apply_usage, limits)
 
@@ -2217,6 +2224,15 @@ class Widget:
         self.layout_limits()
         self.save_pos()
 
+    def section_tip(self, name):
+        """What the heading has to say: the login when there is none to
+        speak of, otherwise nothing — a tooltip repeating the word under
+        the cursor is noise."""
+        state = self.auth.get(name, "ok")
+        if state == "ok":
+            return ""
+        return t(f"widget.auth.{state}", vendor=SECTION_NAMES[name])
+
     def section_var(self, name):
         return self.claude_shown if name == "claude" else self.codex_shown
 
@@ -2331,9 +2347,17 @@ class Widget:
             fable_fg = blend(color, self.surface, 0.55)
         self.fable_tab.render("Fable", fable_fg, self.surface)
         for name, head in self.heads.items():
-            head["head"].render(SECTION_NAMES[name],
-                                SECONDARY if self.section_var(name).get()
-                                else MUTED, self.surface)
+            # Not signed in: the heading says so and turns amber, because a
+            # column of dashes is indistinguishable from a broken widget.
+            locked = self.auth.get(name, "ok") != "ok"
+            label = SECTION_NAMES[name] + (" ⚠" if locked else "")
+            if locked:
+                colour = WARNING
+            elif self.section_var(name).get():
+                colour = SECONDARY
+            else:
+                colour = MUTED
+            head["head"].render(label, colour, self.surface)
 
     @classmethod
     def walk(cls, widget):
@@ -2405,13 +2429,19 @@ class Widget:
             used = window.get("used_percentage")
             if used is None:
                 widgets["pct"].configure(text="—")
-                if key == "codex":
+                section = self.meters[key]["section"]
+                state = self.auth.get(section, "ok")
+                if state != "ok":
+                    # The login outranks every other explanation: with no
+                    # token there is nothing to ask and nothing to wait for.
+                    tip = f"widget.auth.{state}"
+                elif key == "codex":
                     tip = NO_CODEX_TIP      # nothing to do with our cache
                 elif key == "fable" and limits:
                     tip = NO_FABLE_TIP
                 else:
                     tip = NO_DATA_TIP
-                self.tips[key] = t(tip)
+                self.tips[key] = t(tip, vendor=SECTION_NAMES[section])
                 continue
             # The reset time lives in the tooltip: on the card it cost a line
             # per meter and pushed the numbers apart.

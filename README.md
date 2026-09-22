@@ -122,6 +122,11 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
   different weeks, which is what the headings are for. Reset times live in
   the tooltips. Click a heading to fold that vendor away; the **Fable** tab
   in the Claude heading folds just that row.
+- **Not signed in, and the card says so** — a vendor whose token is missing
+  or expired gets an amber heading with a ⚠, and every row under it explains
+  it in the tooltip: a column of dashes is indistinguishable from a broken
+  widget otherwise. An expired Claude login is fixed by starting Claude Code,
+  which refreshes it; the bridge never touches the credential itself.
 - **A section only exists while its vendor does** — no `~/.claude`, no Claude
   rows and no Fable tab; no Codex, no Codex row; neither, and the whole block
   goes rather than leaving empty meters behind.

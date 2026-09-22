@@ -34,3 +34,4 @@ tests/fake_transcript.jsonl
 tests/codex-*/
 tests/claude-*/
 tests/fake-credentials.json
+tests/fake-codex-auth.json

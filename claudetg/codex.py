@@ -73,13 +73,13 @@ LIVE_BACKOFF = 300
 LIVE_TIMEOUT = 8
 
 _cache = {"at": 0.0, "key": None, "reading": None}
-_live = {"next": 0.0, "reading": None}
+_live = {"next": 0.0, "reading": None, "denied": False}
 
 
 def forget():
     """Drop the caches, so the next read actually touches disk and network."""
     _cache.update({"at": 0.0, "key": None, "reading": None})
-    _live.update({"next": 0.0, "reading": None})
+    _live.update({"next": 0.0, "reading": None, "denied": False})
 
 
 def access_token(path=None):
@@ -133,9 +133,28 @@ def fetch_live(token=None, timeout=LIVE_TIMEOUT, url=USAGE_URL, now=None):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # 401/403 is the one failure worth remembering: the token on disk
+        # is no good, and no amount of retrying will change that. Anything
+        # else is weather.
+        _live["denied"] = e.code in (401, 403)
+        return None
     except (urllib.error.URLError, OSError, ValueError):
         return None
+    _live["denied"] = False
     return parse_live(payload, now)
+
+
+def auth_state(path=None):
+    """Whether Codex is signed in: "ok", "expired" or "missing".
+
+    Codex's token carries no expiry we can read, so "expired" is what the
+    endpoint said rather than what the file says: a 401 means the token is
+    there and no longer accepted.
+    """
+    if not access_token(path):
+        return "missing"
+    return "expired" if _live["denied"] else "ok"
 
 
 def sessions_dir(home=None):

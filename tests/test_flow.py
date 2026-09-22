@@ -2137,6 +2137,55 @@ def test_telegram_switch_defaults_to_what_is_configured():
     print("PASS the switch follows the configuration until it is set explicitly")
 
 
+def test_claude_auth_state_tells_missing_from_expired():
+    here = os.path.dirname(os.path.abspath(__file__))
+    creds = os.path.join(here, "fake-credentials.json")
+    now = time.time()
+    try:
+        assert usage.auth_state(creds, now) == "missing", "no file is not a login"
+        with open(creds, "w", encoding="utf-8") as f:
+            json.dump({"claudeAiOauth": {}}, f)
+        assert usage.auth_state(creds, now) == "missing", "no token is not a login"
+        with open(creds, "w", encoding="utf-8") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "x",
+                                         "expiresAt": (now - 60) * 1000}}, f)
+        # Expired is its own answer: only Claude Code can fix it, by starting.
+        assert usage.auth_state(creds, now) == "expired"
+        with open(creds, "w", encoding="utf-8") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "x",
+                                         "expiresAt": (now + 3600) * 1000}}, f)
+        assert usage.auth_state(creds, now) == "ok"
+    finally:
+        try:
+            os.remove(creds)
+        except OSError:
+            pass
+    print("PASS a missing Claude login is told apart from an expired one")
+
+
+def test_codex_auth_state_follows_what_the_endpoint_said():
+    here = os.path.dirname(os.path.abspath(__file__))
+    auth = os.path.join(here, "fake-codex-auth.json")
+    try:
+        codex.forget()
+        assert codex.auth_state(auth) == "missing", "no file is not a login"
+        with open(auth, "w", encoding="utf-8") as f:
+            json.dump({"tokens": {"access_token": "x"}}, f)
+        assert codex.auth_state(auth) == "ok"
+        # Codex's token carries no expiry, so a 401 is the only way to learn
+        # that the one on disk is no longer any good.
+        codex._live["denied"] = True
+        assert codex.auth_state(auth) == "expired"
+        codex.forget()
+        assert codex.auth_state(auth) == "ok", "forget() must clear the refusal"
+    finally:
+        try:
+            os.remove(auth)
+        except OSError:
+            pass
+    print("PASS the Codex login state follows what the endpoint answered")
+
+
 def test_usage_poll_wakes_when_the_cli_writes_a_new_token():
     here = os.path.dirname(os.path.abspath(__file__))
     creds = os.path.join(here, "fake-credentials.json")

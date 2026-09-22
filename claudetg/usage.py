@@ -110,6 +110,28 @@ def access_token(path=None):
     return oauth.get("accessToken") or None
 
 
+def auth_state(path=None, now=None):
+    """Whether Claude Code is signed in: "ok", "expired" or "missing".
+
+    The difference matters to whoever reads it. Missing means nobody has
+    ever logged in on this machine; expired means they did and the token
+    has run out, which only Claude Code itself can fix by starting up.
+    Either way the poll can do nothing, and a card that just shows a dash
+    makes it look like the widget is broken.
+    """
+    try:
+        with open(path or CREDENTIALS, encoding="utf-8") as f:
+            oauth = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except (OSError, ValueError, AttributeError):
+        return "missing"
+    if not oauth.get("accessToken"):
+        return "missing"
+    expires = oauth.get("expiresAt")
+    if expires and expires / 1000.0 <= (now or time.time()):
+        return "expired"
+    return "ok"
+
+
 def credentials_stamp(path=None):
     """When the CLI last rewrote its credentials — which is when a token
     that had expired stops being expired. Zero when there is no file."""
