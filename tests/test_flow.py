@@ -2137,6 +2137,75 @@ def test_telegram_switch_defaults_to_what_is_configured():
     print("PASS the switch follows the configuration until it is set explicitly")
 
 
+def _widget_module():
+    """widget.pyw as an importable module. Imports tkinter but opens nothing."""
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "widget.pyw")
+    loader = importlib.machinery.SourceFileLoader("widget_under_test", path)
+    spec = importlib.util.spec_from_loader("widget_under_test", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class _FakeWidget:
+    """Just enough of a Tk widget for the hover hit-test."""
+
+    def __init__(self, x, y, w, h, mapped=True):
+        self.box, self.mapped = (x, y, w, h), mapped
+
+    def winfo_ismapped(self):
+        return self.mapped
+
+    def winfo_rootx(self):
+        return self.box[0]
+
+    def winfo_rooty(self):
+        return self.box[1]
+
+    def winfo_width(self):
+        return self.box[2]
+
+    def winfo_height(self):
+        return self.box[3]
+
+
+class _FakeTip:
+    def __init__(self, widget):
+        self.widget, self.tip = widget, None
+
+
+class _FakeRoot:
+    def winfo_viewable(self):
+        return True
+
+
+def test_hover_finds_the_row_under_the_pointer():
+    w = _widget_module()
+    frame = _FakeTip(_FakeWidget(0, 0, 200, 100))       # the block behind it
+    bar = _FakeTip(_FakeWidget(20, 40, 150, 6))         # a meter: six pixels
+    hidden = _FakeTip(_FakeWidget(20, 40, 150, 6, mapped=False))
+    saved = list(w.TOOLTIPS)
+    w.TOOLTIPS[:] = [frame, bar, hidden]
+    try:
+        watch = w.HoverWatch(_FakeRoot())
+        # Dead centre of the meter: the meter wins over the frame around it,
+        # because the smallest match is the most specific one.
+        assert watch._tip_at(90, 43) is bar
+        # A few pixels above it is still the meter's row: a six-pixel target
+        # is not something a hand can be asked to hit.
+        assert watch._tip_at(90, 37) is bar, "no slack above the row"
+        assert watch._tip_at(90, 49) is bar, "no slack below the row"
+        # Far from it, only the frame answers; outside everything, nothing.
+        assert watch._tip_at(90, 90) is frame
+        assert watch._tip_at(400, 400) is None
+    finally:
+        w.TOOLTIPS[:] = saved
+    print("PASS the hover watch finds the row under the pointer")
+
+
 def test_claude_auth_state_tells_missing_from_expired():
     here = os.path.dirname(os.path.abspath(__file__))
     creds = os.path.join(here, "fake-credentials.json")

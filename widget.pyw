@@ -699,8 +699,18 @@ class Tray(threading.Thread):
                 pass
 
 
+# Every tooltip ever built, so the hover watch can find the one under the
+# pointer. They live as long as the card does; none is ever destroyed.
+TOOLTIPS = []
+
+
 class Tooltip:
-    """Hover hint for widgets that have no room for a caption."""
+    """Hover hint for widgets that have no room for a caption.
+
+    Driven by <Enter>/<Leave> normally, and by HoverWatch while the card is
+    click-through: a window taken out of hit-testing receives neither, so
+    the only way to know the pointer is over a meter is to go and look.
+    """
 
     def __init__(self, widget, text_getter, font):
         self.widget = widget
@@ -713,6 +723,7 @@ class Tooltip:
         widget.bind("<Leave>", self.hide, add="+")
         widget.bind("<ButtonPress>", self.hide, add="+")
         widget.bind("<Button-1>", self.hide, add="+")
+        TOOLTIPS.append(self)
 
     def schedule(self, _event=None):
         self.cancel()
@@ -736,6 +747,18 @@ class Tooltip:
                               highlightthickness=1, highlightbackground=EDGE)
         self.label.pack()
         self.tip.geometry(f"+{x + 12}+{y + 16}")
+        # A tip that catches the mouse is a hole in a card that does not:
+        # the pointer would land on the tip rather than on whatever the card
+        # is lying over, and the click-through mode would leak.
+        # The card is topmost and re-lifted on every poll along with its
+        # stand-ins; a tip that only said "topmost" once ended up underneath
+        # it within three seconds, existing but invisible.
+        self.tip.lift()
+        # The tip is not made click-through itself, on purpose. Layering it
+        # and taking it out of hit-testing left a black rectangle: the window
+        # was there, the surface never drawn. It does not need to be — it
+        # appears down and to the right of the pointer, so a click goes past
+        # it, and it is gone as soon as the pointer moves off the row.
 
     def refresh(self):
         """Live state changed under the cursor: update the open tip, not lie."""
@@ -751,6 +774,102 @@ class Tooltip:
         if self.tip:
             self.tip.destroy()
             self.tip = None
+
+
+class HoverWatch:
+    """Hover, for a card the mouse cannot touch.
+
+    With click-through on, the card is out of hit-testing: no <Enter>, no
+    <Leave>, no tooltips — and the reset times live in those tooltips, in
+    exactly the mode the card is meant to be left in. So the pointer is looked
+    up instead, and the widget under it found the way Tk itself would.
+
+    It only runs while the card is click-through; the real events do the work
+    the rest of the time, and the two never fight over the same tip.
+    """
+
+    EVERY_MS = 150          # about the pause of a hand coming to rest
+    DWELL = 0.35            # and how long it has to rest before a tip appears
+    SLACK = 4               # pixels of forgiveness above and below a row
+
+    def __init__(self, root):
+        self.root = root
+        self.on = False
+        self.over = None            # the tooltip currently showing
+        self.candidate = None       # the one the pointer has just reached
+        self.since = 0.0
+        self.job = None
+
+    def enable(self, on):
+        self.on = bool(on)
+        if self.on and self.job is None:
+            self._tick()
+        elif not self.on:
+            self._drop()
+
+    def _drop(self):
+        if self.over:
+            self.over.hide()
+        self.over = self.candidate = None
+
+    def _tick(self):
+        self.job = None
+        if not self.on:
+            return
+        try:
+            self._look()
+        except tk.TclError:
+            pass                    # a window went away mid-look
+        self.job = self.root.after(self.EVERY_MS, self._tick)
+
+    def _look(self):
+        x, y = self.root.winfo_pointerxy()
+        tip = self._tip_at(x, y)
+        if tip is not self.candidate:
+            self.candidate, self.since = tip, time.time()
+        if self.over and tip is not self.over:
+            self.over.hide()        # left it, whatever the pointer found next
+            self.over = None
+        if tip is None:
+            return
+        if tip is self.over:
+            self.over.refresh()     # the number under it moves while it is up
+            return
+        if time.time() - self.since >= self.DWELL:
+            tip.show()
+            self.over = tip if tip.tip else None
+
+    def _tip_at(self, x, y):
+        """The tooltip whose widget the pointer is over, or None.
+
+        The rectangles are compared by hand rather than asked of
+        `winfo_containing`: that goes through the system hit-test, and a
+        click-through window is exactly what the system has been told to
+        ignore — it answers None for every point over the card.
+
+        The smallest match wins, so a meter beats the frame holding it.
+        """
+        if not self.root.winfo_viewable():
+            return None
+        best, best_area = None, None
+        for tip in TOOLTIPS:
+            widget = tip.widget
+            try:
+                if not widget.winfo_ismapped():
+                    continue
+                left, top = widget.winfo_rootx(), widget.winfo_rooty()
+                w, h = widget.winfo_width(), widget.winfo_height()
+            except tk.TclError:
+                continue
+            # A meter is a few pixels tall; asking the hand to land on it
+            # exactly is asking too much, so the row is met halfway.
+            if not (left <= x < left + w
+                    and top - self.SLACK <= y < top + h + self.SLACK):
+                continue
+            area = w * h
+            if best_area is None or area < best_area:
+                best, best_area = tip, area
+        return best
 
 
 class PopupMenu:
@@ -1229,8 +1348,11 @@ class Widget:
                 self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
                                     "ramp": ramp, "section": section}
                 self.tips[key] = t(NO_DATA_TIP)
-                Tooltip(bar, lambda k=key: self.tips[k], self.small)
-                Tooltip(pct, lambda k=key: self.tips[k], self.small)
+                # All three parts of the row, so the answer is the same
+                # wherever in the line the pointer happens to be: a meter
+                # is six pixels tall at 70%, which is no target at all.
+                for part in (caption, bar, pct):
+                    Tooltip(part, lambda k=key: self.tips[k], self.small)
                 row += 1
         # Named, because it is what the limits block is packed in front of
         # once the block has been hidden and has to come back — and packed
@@ -1255,6 +1377,7 @@ class Widget:
 
         # -- borderless plumbing: menu everywhere, drag on passive parts --
         self.pop = PopupMenu(self.root, self.small)
+        self.hover_watch = HoverWatch(self.root)
         for area in (self.root, top, self.info_label, meters,
                      *[m[part] for m in self.meters.values()
                        for part in ("bar", "pct", "caption")]):
@@ -2089,6 +2212,10 @@ class Widget:
         # once the card stops receiving mouse events.
         self.info_tip.hide()
         self.toggle_tip.hide()
+        # From here on nobody will be told the pointer arrived, so the watch
+        # goes and looks — the reset times live in those tips, and this is
+        # the mode the card spends its life in.
+        self.hover_watch.enable(on)
         self.build_punch() if on else self.drop_punch()
         # The card's size did not change, so <Configure> will not fire: cut or
         # restore the hole explicitly.
@@ -2201,6 +2328,14 @@ class Widget:
                 lift_window(win)
             except tk.TclError:
                 pass
+        # Tips last: they are the smallest thing on screen and the one most
+        # easily buried by the card lifting itself back over them.
+        for tip in TOOLTIPS:
+            if tip.tip is not None:
+                try:
+                    tip.tip.lift()
+                except tk.TclError:
+                    pass
 
     def toggle_fable(self):
         self.fable_shown.set(0 if self.fable_shown.get() else 1)

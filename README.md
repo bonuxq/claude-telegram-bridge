@@ -158,6 +158,11 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
 - **Menu** — Telegram, Projects, Features (every daemon toggle, applied
   instantly), transparency presets, scale, click-through, auto-away, reset
   the widget, hide-to-tray. The gear's tooltip says which version is running.
+- **Tooltips work with click-through on** — a window taken out of hit-testing
+  gets no <Enter> and no <Leave>, so the widget watches where the pointer is
+  instead and shows the same hint when it comes to rest over a row. That is
+  where the reset times live, and click-through is the mode the card spends
+  its life in.
 - **Click-through** — the card stops catching the mouse, so it can sit over
   your editor without being in the way. The presence capsule and the gear
   stay live: each gets a solid stand-in window, with a matching hole cut in
