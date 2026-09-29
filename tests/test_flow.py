@@ -1,5 +1,6 @@
 """End-to-end exercise of the daemon's event handling with a fake Telegram."""
 
+import base64
 import json
 import os
 import shutil
@@ -2347,6 +2348,63 @@ def test_codex_live_answer_is_read_like_a_rollout():
     assert reading["source"] == "live" and reading["pool"] == "codex", reading
     assert codex.parse_live({"rate_limit": {}}, now=now) is None, "no windows, no reading"
     print("PASS the live Codex answer is read like a rollout record")
+
+
+def test_codex_usage_is_asked_about_the_account_the_token_owns():
+    """Seen live: without `chatgpt-account-id` the endpoint answered about a
+    different pool of the same plan — 100% and "you're out of Codex messages"
+    while Codex itself reported 91% and went on answering."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    auth = os.path.join(here, "fake-codex-account.json")
+    claims = base64.urlsafe_b64encode(json.dumps(
+        {"https://api.openai.com/auth": {"chatgpt_account_id": "in-the-claim"}}
+    ).encode()).decode().rstrip("=")           # the CLI drops the padding too
+    id_token = "header." + claims + ".signature"
+    try:
+        assert codex.account_id(auth) is None, "invented an account from nothing"
+        with open(auth, "w", encoding="utf-8") as f:
+            json.dump({"tokens": {"access_token": "x", "id_token": id_token}}, f)
+        assert codex.account_id(auth) == "in-the-claim", (
+            "an older auth.json carries the account only inside the id_token")
+        with open(auth, "w", encoding="utf-8") as f:
+            json.dump({"tokens": {"access_token": "x", "id_token": id_token,
+                                  "account_id": "beside-the-token"}}, f)
+        assert codex.account_id(auth) == "beside-the-token", (
+            "the field the CLI writes must win over a claim that may be older")
+    finally:
+        try:
+            os.remove(auth)
+        except OSError:
+            pass
+
+    class Answer:
+        def read(self):
+            return json.dumps({"rate_limit": {"primary_window": {
+                "used_percent": 91, "limit_window_seconds": 604800,
+                "reset_at": 2}}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    sent = {}
+
+    def watch(request, **_):
+        sent.update(request.headers)
+        return Answer()
+
+    original = codex.urllib.request.urlopen
+    codex.urllib.request.urlopen = watch
+    try:
+        reading = codex.fetch_live(token="x", account="acct-1", now=1.0)
+    finally:
+        codex.urllib.request.urlopen = original
+    # urllib capitalises header names as it stores them.
+    assert sent.get("Chatgpt-account-id") == "acct-1", sent
+    assert reading["used_percentage"] == 91.0, reading
+    print("PASS the Codex endpoint is asked about the account the token owns")
 
 
 def test_codex_fresher_reading_wins():

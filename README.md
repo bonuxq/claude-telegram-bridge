@@ -133,9 +133,13 @@ A frameless dark card, always on top. Drag anywhere to move, right-click
 - **Codex limits** are asked of the usage endpoint Codex's own CLI reads
   for `/status` (`chatgpt.com/backend-api/wham/usage`), once a minute, with
   the token the CLI keeps in `~/.codex/auth.json` — the same way `usage_poll`
-  works for Claude, and off with `codex_poll.enabled` in Features. This is
-  the only source that knows about a week spent from a phone or another
-  machine. The logs Codex writes anyway (`~/.codex/sessions/**/rollout-*.jsonl`
+  works for Claude, and off with `codex_poll.enabled` in Features. Which
+  account is being asked about has to be said, with the `chatgpt-account-id`
+  the CLI sends on every request: without it the endpoint answers about some
+  other pool of the same plan, which is how the card came to read 100% and
+  "out of Codex messages" while Codex itself reported 91% and went on
+  answering. This is the only source that knows about a week spent from a
+  phone or another machine. The logs Codex writes anyway (`~/.codex/sessions/**/rollout-*.jsonl`
   and `archived_sessions/`, the `token_count` events) are the fallback, and
   whichever reading is fresher wins. Codex reports one pool per model plus
   the plan's own; the row is the plan's weekly window, found by its length

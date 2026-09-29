@@ -8,6 +8,13 @@ was at 100%. `GET chatgpt.com/backend-api/wham/usage`, with the token the CLI
 keeps in `~/.codex/auth.json`, answers for the account rather than the
 machine; it is what `codex` itself reads for `/status`.
 
+It answers for the *account* only when told which one. `chatgpt-account-id`
+is a header the CLI sends on every request and this did not; without it the
+endpoint falls back to some other pool of the same plan, and that pool can
+have run out while the one being spent has not — 100% and "you're out of
+Codex messages" from the endpoint while Codex itself was reporting 91% and
+answering normally. The id is Codex's own, out of the same file as the token.
+
 The logs are the fallback: a rollout per session under
 `~/.codex/sessions/YYYY/MM/DD/` (moved to `archived_sessions/` once closed),
 where every answer appends a `token_count` event carrying the same
@@ -23,6 +30,7 @@ it to itself. `codex_poll.enabled` in config.json turns the endpoint off,
 leaving only the logs.
 """
 
+import base64
 import datetime
 import json
 import os
@@ -82,15 +90,47 @@ def forget():
     _live.update({"next": 0.0, "reading": None, "denied": False})
 
 
-def access_token(path=None):
-    """The CLI's own token, or None. The CLI rewrites the file when it
-    refreshes, so a later read recovers from an expired one."""
+def _tokens(path=None):
+    """Codex's token bag, or an empty one. The CLI rewrites the file when it
+    refreshes, so a later read recovers from an expired token."""
     try:
         with open(path or AUTH, encoding="utf-8") as f:
-            tokens = (json.load(f) or {}).get("tokens") or {}
+            return (json.load(f) or {}).get("tokens") or {}
     except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def access_token(path=None):
+    """The CLI's own token, or None."""
+    return _tokens(path).get("access_token") or None
+
+
+def _claim(id_token, name):
+    """One claim out of an id_token's payload, or None.
+
+    Read, not verified: this is Codex's own file, opened to learn which
+    account it speaks for. Nothing is being let in on the strength of it.
+    """
+    try:
+        payload = str(id_token).split(".")[1]
+        payload += "=" * (-len(payload) % 4)      # the CLI drops the padding
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (IndexError, ValueError, TypeError):
         return None
-    return tokens.get("access_token") or None
+    scope = (claims or {}).get("https://api.openai.com/auth") or {}
+    return scope.get(name) or None
+
+
+def account_id(path=None):
+    """Which ChatGPT account the token speaks for, or None.
+
+    Recent CLIs write it beside the token; older ones only carry it inside
+    the id_token, so the claim is the fallback. None means the request goes
+    out the way it used to — a wrong pool is still better than no row.
+    """
+    tokens = _tokens(path)
+    return tokens.get("account_id") or _claim(tokens.get("id_token"),
+                                              "chatgpt_account_id")
 
 
 def parse_live(payload, now=None):
@@ -119,17 +159,24 @@ def parse_live(payload, now=None):
             "source": "live"}
 
 
-def fetch_live(token=None, timeout=LIVE_TIMEOUT, url=USAGE_URL, now=None):
+def fetch_live(token=None, timeout=LIVE_TIMEOUT, url=USAGE_URL, now=None,
+               account=None):
     """Ask the endpoint the CLI uses. None on any failure: the logs are
     still there, and a widget is not the place to report a dead network."""
     token = token or access_token()
     if not token:
         return None
-    request = urllib.request.Request(url, headers={
+    headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "User-Agent": "claudetg-bridge (stdlib urllib)",
-    })
+    }
+    # Which account is being asked about. Left out, the answer is about some
+    # other pool of the same plan — see the module docstring.
+    account = account or account_id()
+    if account:
+        headers["chatgpt-account-id"] = account
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
