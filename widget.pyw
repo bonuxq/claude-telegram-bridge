@@ -77,6 +77,10 @@ AWAY = {"dot": WARNING, "button": "widget.away", "label": "widget.away.hint"}
 DEAD = {"dot": CRITICAL, "button": "widget.dead", "label": "widget.dead.hint"}
 
 BAR_H = 8                  # meter thickness; r = h/2 gives the 4px rounded end
+# Room a ShadowText keeps around its text for the shadow, and therefore the
+# inset every row beside one is laid out to. Two pixels: the shadow is one,
+# and the halo `render` can draw instead of it is two.
+SHADOW_PAD = 2
 HOLE_INSET = 2             # how far inside its stand-in a hole is cut
 STALE_AFTER = 1800         # a reading older than this is drawn dimmed
 NO_DATA_TIP = "widget.no_data"
@@ -417,7 +421,7 @@ class ShadowText(tk.Canvas):
     """A text label with a drop shadow. A tk.Label cannot draw one, and the
     shadow is what keeps these labels legible once the card turns red."""
 
-    def __init__(self, parent, font, pad=6):
+    def __init__(self, parent, font, pad=SHADOW_PAD):
         super().__init__(parent, bg=SURFACE, highlightthickness=0, bd=0,
                          cursor="hand2")
         self.font = font
@@ -1242,8 +1246,17 @@ class Widget:
         except tk.TclError:
             pass
 
-        bold = tkfont.Font(family="Segoe UI", size=self.pt(11), weight="bold")
+        # The capsule caption. Scaled, unlike `self.bold` below: it is drawn
+        # on the card, inside a canvas that shrinks with everything else, and
+        # an 11pt caption in a 21px pill is how the text came to sit on the
+        # pill's bottom edge at 70%.
+        self.card_bold = tkfont.Font(family="Segoe UI", size=self.pt(11),
+                                     weight="bold")
         small = tkfont.Font(family="Segoe UI", size=self.pt(8))
+        # The vendor headings: an eyebrow over the rows, so a step down from
+        # the captions rather than the same size in a different grey.
+        head_font = tkfont.Font(family="Segoe UI", size=self.pt(8),
+                                weight="bold")
         value = tkfont.Font(family="Segoe UI", size=self.pt(9), weight="bold")
         gear_font = tkfont.Font(family="Segoe UI", size=self.pt(12))
         # Scaling shrinks the card, not the things that open on top of it: a
@@ -1315,36 +1328,55 @@ class Widget:
             ("codex", (("codex", t("widget.meter.seven_day"), severity),)),
         )
         meters.columnconfigure(1, weight=1)
+        # The captions sized to the longest one there actually is, rather
+        # than to eight characters of Segoe UI: "Εβδομάδα" and "Συνεδρία" are
+        # eight letters that do not fit in eight, and the column may not give
+        # way when a section folds or the card would twitch on every click.
+        meters.columnconfigure(0, minsize=SHADOW_PAD + self.px(4) + max(
+            small.measure(label) for _, rows in sections
+            for _, label, _ in rows))
         row = 0
         for section, rows in sections:
-            head = ShadowText(meters, small)
-            head.grid(row=row, column=0, columnspan=2, sticky="w")
+            head = ShadowText(meters, head_font)
+            # An eyebrow, not another caption: set upper case in paint_tabs,
+            # with the space above it doing the work the hairline used to.
+            # Four full-width rules on a card holding four numbers read as
+            # a table nobody asked for.
+            head.grid(row=row, column=0, columnspan=2, sticky="w",
+                      pady=(0, self.px(3)))
             head.bind("<Button-1>",
                       lambda e, s=section: (self.toggle_section(s), "break")[1])
             Tooltip(head, lambda s=section: self.section_tip(s), self.small)
-            rule = tk.Frame(meters, height=1, bg=HAIRLINE)
-            rule.grid(row=row + 1, column=0, columnspan=3, sticky="ew",
-                      pady=(1, self.px(3)))
-            self.heads[section] = {"head": head, "rule": rule, "row": row}
+            self.heads[section] = {"head": head}
             if section == "claude":
                 # The Fable fold belongs beside the section it lives in, not
                 # over a heading that says nothing about it.
                 self.fable_tab = ShadowText(meters, small)
-                self.fable_tab.grid(row=row, column=2, sticky="e")
+                self.fable_tab.grid(row=row, column=2, sticky="e",
+                                    pady=(0, self.px(3)))
                 self.fable_tab.bind(
                     "<Button-1>", lambda e: (self.toggle_fable(), "break")[1])
-            row += 2
+            row += 1
             for key, label, ramp in rows:
+                # padx=0: a tk.Label keeps a pixel of its own on each side
+                # by default, and that pixel is the difference between the
+                # caption and the heading starting in the same place.
                 caption = tk.Label(meters, text=label, font=small, bg=SURFACE,
-                                   fg=SECONDARY, anchor="w", width=8)
-                caption.grid(row=row, column=0, sticky="w", pady=self.px(2))
+                                   fg=SECONDARY, anchor="w", padx=0)
+                # The headings carry their shadow's margin inside the canvas,
+                # so the rows are inset by the same amount: without it the
+                # eyebrow stood a few pixels right of the captions under it
+                # and the fold control a few pixels left of the percentages.
+                caption.grid(row=row, column=0, sticky="w", pady=self.px(2),
+                             padx=(SHADOW_PAD, 0))
                 bar = tk.Canvas(meters, width=self.px(170), height=self.bar_h,
                                 bg=SURFACE, highlightthickness=0)
                 bar.grid(row=row, column=1, sticky="ew",
                          padx=(self.px(2), self.px(8)), pady=self.px(2))
                 pct = tk.Label(meters, text="—", font=value, bg=SURFACE,
-                               fg=PRIMARY, anchor="e", width=5)
-                pct.grid(row=row, column=2, sticky="e", pady=self.px(2))
+                               fg=PRIMARY, anchor="e", width=5, padx=0)
+                pct.grid(row=row, column=2, sticky="e", pady=self.px(2),
+                         padx=(0, SHADOW_PAD))
                 self.meters[key] = {"bar": bar, "pct": pct, "caption": caption,
                                     "ramp": ramp, "section": section}
                 self.tips[key] = t(NO_DATA_TIP)
@@ -1568,15 +1600,26 @@ class Widget:
         return blend(self.surface, "#ffffff", 0.20 if self.hover else 0.11)
 
     def paint_capsule(self, c):
+        """The presence pill, measured off the canvas it is given.
+
+        Every number here used to be the one the card happens to be at 100%:
+        a 30px pill, a dot at 14,11 and an 11pt caption. At 70% the canvas is
+        21px tall, so the pill was drawn a third taller than its room and
+        came out with its bottom sliced square and the caption on the cut.
+        """
         c.delete("all")
-        w, h = max(c.winfo_width(), 60), 30
-        r = h // 2
+        h = max(c.winfo_height(), self.px(30))
+        w = max(c.winfo_width(), self.px(60))
+        r = h / 2
         fill = self.capsule_fill()
-        c.create_oval(0, 0, 2 * r, h, fill=fill, outline="")
-        c.create_oval(w - 2 * r, 0, w, h, fill=fill, outline="")
+        c.create_oval(0, 0, h, h, fill=fill, outline="")
+        c.create_oval(w - h, 0, w, h, fill=fill, outline="")
         c.create_rectangle(r, 0, w - r, h, fill=fill, outline="")
-        c.create_oval(14, 11, 22, 19, fill=self.theme["dot"], outline="")
-        c.create_text(32, 15, text=t(self.theme["button"]), font=self.bold,
+        dot, left = self.px(8), self.px(14)
+        c.create_oval(left, r - dot / 2, left + dot, r + dot / 2,
+                      fill=self.theme["dot"], outline="")
+        c.create_text(left + dot + self.px(10), r,
+                      text=t(self.theme["button"]), font=self.card_bold,
                       fill=PRIMARY, anchor="w")
 
     # -- borderless window plumbing --------------------------------------
@@ -2395,7 +2438,8 @@ class Widget:
             # is not itself packed is an error, not a no-op.
             anchor = (self.meters_frame if self.meters_frame.winfo_ismapped()
                       else self.info_rule)
-            self.alarm_label.pack(fill="x", pady=(4, 0), before=anchor)
+            self.alarm_label.pack(fill="x", pady=(self.px(4), 0),
+                                  before=anchor)
         else:
             self.alarm_label.pack_forget()
         self.root.geometry("")                  # the card grew or shrank
@@ -2432,16 +2476,13 @@ class Widget:
             for part in ("caption", "bar", "pct"):
                 row[part].grid() if wanted else row[part].grid_remove()
         for name, head in self.heads.items():
-            if installed[name]:
-                head["head"].grid()
-                head["rule"].grid()
-            else:
-                head["head"].grid_remove()
-                head["rule"].grid_remove()
+            head["head"].grid() if installed[name] else head["head"].grid_remove()
         # The gap that separates the two sections belongs to the lower one,
         # and only while there is something above it to be separated from.
+        # With the hairlines gone this gap is the separator, so it is worth
+        # a real step rather than the eight scale-blind pixels it was.
         self.heads["codex"]["head"].grid_configure(
-            pady=(8 if installed["claude"] else 0, 0))
+            pady=(self.px(11) if installed["claude"] else 0, self.px(3)))
         if installed["claude"] and open_now["claude"]:
             self.fable_tab.grid()
         else:
@@ -2480,12 +2521,20 @@ class Widget:
             fable_fg = color
         else:
             fable_fg = blend(color, self.surface, 0.55)
-        self.fable_tab.render("Fable", fable_fg, self.surface)
+        # The arrow is what makes this a control. An orange word alone, set
+        # right of a heading and over a row of its own called Fable, read as
+        # a reading the card had run out of room for.
+        open_now = bool(self.fable_shown.get()) or self.fable_alarm
+        self.fable_tab.render(("▾ " if open_now else "▸ ") + "Fable",
+                              fable_fg, self.surface)
         for name, head in self.heads.items():
             # Not signed in: the heading says so and turns amber, because a
             # column of dashes is indistinguishable from a broken widget.
             locked = self.auth.get(name, "ok") != "ok"
-            label = SECTION_NAMES[name] + (" ⚠" if locked else "")
+            # Upper case: a heading and a caption were the same eight points
+            # of Segoe UI a shade apart, so "Claude" read as one more row
+            # label and the two weeks below looked like the same week twice.
+            label = SECTION_NAMES[name].upper() + (" ⚠" if locked else "")
             if locked:
                 colour = WARNING
             elif self.section_var(name).get():
@@ -2636,16 +2685,35 @@ class Widget:
         ramp = row.get("ramp") or severity
         self.tray.set_percent(rounded, ramp(percent))
 
+    def meter_colors(self, fill):
+        """Track and fill for one meter, against whatever the card is wearing.
+
+        On the plain surface the ramp colour is the fill and the track is its
+        own quiet step. On an alarm background it cannot be: the card is red
+        and so is a spent meter, and red on red left every bar invisible at
+        the one moment they were the thing to look at — 2:1 against the
+        alarm, where the percentages beside them sat at 10:1.
+
+        So the alarm draws light on dark instead: the fill is mixed toward
+        white until it reads on the alarm, and the track is dropped below the
+        card, which keeps a row a bar with a length even at 99%.
+        """
+        if self.surface == SURFACE:
+            return blend(fill, self.surface, 0.78), fill
+        return (blend(self.surface, "#000000", 0.35),
+                blend(fill, "#ffffff", 0.45))
+
     def draw_meter(self, canvas, percent, ramp=None):
-        """Capsule meter: the ramp picks the fill, track = its own quiet step."""
+        """Capsule meter: the ramp picks the fill, the card picks the pair."""
         # Resolved here, not as a default: the ramps are defined below the
         # class, so a default argument would be evaluated before they exist.
         ramp = ramp or severity
         canvas.delete("all")
         canvas.update_idletasks()
         width = max(canvas.winfo_width(), 60)
-        fill = ramp(percent) if percent is not None else ACCENT
-        self.capsule(canvas, 0, width, blend(fill, self.surface, 0.78))
+        track, fill = self.meter_colors(
+            ramp(percent) if percent is not None else ACCENT)
+        self.capsule(canvas, 0, width, track)
         if percent is not None and percent > 0:
             share = max(0.0, min(100.0, percent)) / 100.0
             self.capsule(canvas, 0, max(self.bar_h, round(width * share)), fill)

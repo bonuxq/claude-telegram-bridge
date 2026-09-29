@@ -36,3 +36,6 @@ tests/claude-*/
 tests/fake-credentials.json
 tests/fake-codex-auth.json
 tests/fake-codex-account.json
+
+# Dev harness scratch profile
+tools/.preview/
