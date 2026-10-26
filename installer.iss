@@ -36,6 +36,16 @@ UninstallDisplayIcon={app}\{#AppShort}.exe
 ; Offer to close a running copy instead of failing on a locked file.
 CloseApplications=yes
 RestartApplications=no
+; Authenticode. build.py passes /DSign=1 together with the matching
+; /Sbonux=<command> it gets from scripts\Sign-Windows.ps1, so the directives
+; only exist on a build that is actually being signed — `--no-sign` still
+; compiles rather than failing on a sign tool nobody defined. Inno signs two
+; things the compiler alone can produce: this setup binary, and the
+; uninstaller it writes into the install directory.
+#ifdef Sign
+SignTool=bonux
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"

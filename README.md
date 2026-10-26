@@ -36,7 +36,10 @@ bridge is Python standard library.
   off entirely to leave a pure limits monitor.
 - **Self-updating**: the installed build fetches new releases from GitHub and
   installs them the first moment no session is running or waiting. It refuses
-  any download whose published SHA-256 it cannot confirm.
+  any download whose published SHA-256 it cannot confirm. Builds from 1.0.17
+  are Authenticode-signed (Oleksii Holiuk, Certum), so Windows can name the
+  publisher before the installer runs — see
+  [WINDOWS-SIGNING.md](WINDOWS-SIGNING.md).
 - **Watchdog, daily digest, git summaries, status.claude.com monitor** — all
   optional, all toggleable from the widget.
 - **9 languages** — English, Українська, Русский, 한국어, 中文, Tiếng Việt,

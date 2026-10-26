@@ -340,8 +340,10 @@ found and another when it is installed.
 **It refuses to install what it cannot verify.** Every release publishes the
 SHA-256 of its setup file in the release notes; a download whose hash does not
 match, or that carries no published hash at all, is reported and left alone.
-Downloads are only accepted from GitHub's own hosts. Until the builds are
-code-signed, that checksum is the only thing standing behind the binary.
+Downloads are only accepted from GitHub's own hosts. From 1.0.17 the setup
+file is Authenticode-signed as well, so Windows checks the publisher before
+the installer runs and the checksum is no longer the only thing standing
+behind the binary.
 
 Running from source, this does nothing at all — there the update is
 `git pull`. The widget's Telegram screen says which of the two you are on.

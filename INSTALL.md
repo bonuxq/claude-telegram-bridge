@@ -149,8 +149,12 @@ Features, and that you have signed in to Claude Code on this machine. See [FEATU
 If port 8787 is busy, the daemon is already running and a second one is not
 needed. The widget logs its own crashes to `widget.log` in the same folder.
 
-**Windows says "unknown publisher".** The build is not code-signed yet. You
-can check the sources and build it yourself with the commands above.
+**Windows says "unknown publisher".** Releases from 1.0.17 on are signed as
+**Oleksii Holiuk** (Certum), so SmartScreen names the publisher instead of
+refusing to. Reputation is built from downloads, though, so a brand-new
+version can still be warned about for a while. Right-click the setup file ->
+Properties -> Digital Signatures to see who signed it, or check the SHA-256
+published with the release.
 
 ---
 
